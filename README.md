@@ -8,7 +8,7 @@ This firmware transforms an ESP32-S3 into a dual-interface smart switch actuator
 * **Thermal & Power Optimization:** Hardware is strictly underclocked to 80 MHz and utilizes deep FreeRTOS yielding (20 ms idle loops) to run ice-cold while maintaining sub-second responsiveness.
 * **Persistent Crash Forensics:** The NVS (Non-Volatile Storage) `Preferences` library records up to 50 rolling boot events, translating raw hardware watchdogs and exception panics into human-readable logs.
 * **Live Telemetry:** Monitors real-time CPU clock, RAM/Flash/PSRAM usage, internal temperature, estimated power draw, and exact firmware initialization times.
-* **OTA Updates:** Supports seamless Over-The-Air updates directly through the Arduino IDE.
+* **OTA Updates:** Supports seamless Over-The-Air updates directly through the Arduino IDE. This is incredibly useful for making minor variable adjustments (such as tweaking servo angles or timers) once the device is permanently installed, without needing to plug it back into a computer.
 
 ### Hardware Requirements
 
@@ -16,30 +16,46 @@ This firmware transforms an ESP32-S3 into a dual-interface smart switch actuator
 * **Actuator:** Standard 5V/3.3V Servo Motor.
 * **Wiring:** Connect the Servo Signal wire to **GPIO 1** (or your configured `servoPin`), with standard VCC and GND.
 
+### Servo Calibration (`calibrateservo.ino`)
+
+Before flashing the main firmware, you must calibrate your servo to prevent mechanical strain, overheating, or burnout. A standalone calibration sketch is provided to safely test your physical limits.
+
+1. Open and flash the `calibrateservo.ino` sketch to your ESP32-S3 via USB.
+2. Open the Arduino IDE **Serial Monitor** (set the dropdowns to **115200 baud** and **Newline**).
+3. Type a starting angle (e.g., `0`) and press Enter to move the servo arm.
+4. Find your ideal **`restAngle`**: The arm should hover securely above the button without touching it.
+5. Step the angle down slowly (e.g., `10`, `20`, `30`) to find the **`pressAngle`**: The arm should push the button far enough to click it.
+* *Critical Note:* If the servo starts vibrating or "buzzing", you have pushed it too far and it is stalling against the plastic casing. Back the angle off immediately to prevent motor damage.
+
+
+6. Write down your perfect `restAngle` and `pressAngle` values to insert into the main firmware configuration.
+
 ### Installation via Arduino IDE
 
 1. **Board Manager Setup:**
+
 * Go to **File > Preferences** and add the Espressif boards URL:
 `[https://dl.espressif.com/dl/package_esp32_index.json](https://dl.espressif.com/dl/package_esp32_index.json)`
 * Go to **Tools > Board > Boards Manager**, search for `esp32` by Espressif Systems, and install the latest version.
 
-
 2. **Select the Board:**
+
 * Navigate to **Tools > Board** and select **ESP32S3 Dev Module**.
 * Set **Flash Mode** to `QIO 80MHz`.
 * Set **Partition Scheme** to `Default 4MB with spiffs` (or match your specific board's flash size).
 
-
 3. **Install Dependencies:**
+
 * Go to **Sketch > Include Library > Manage Libraries**.
 * Search for and install **ESP32Servo** by Kevin Harrington. *(Note: All other libraries like `WiFi`, `WebServer`, `Preferences`, and `ArduinoOTA` are built into the ESP32 core).*
 
-
 4. **Compile and Flash:** Connect your board via USB, select the correct COM/Serial port, and upload the sketch.
+
+* *OTA Note:* After this initial USB flash, your device will appear in the Arduino IDE under **Tools > Port > Network Ports** (e.g., `esp32 at 192.168.1.50`). You can use this port for all future wireless flashes.
 
 ### Configuration
 
-Before uploading, modify the User Configuration block at the top of the `.ino` file to match your network and hardware mechanics:
+Before uploading the main firmware, modify the User Configuration block at the top of the `.ino` file to match your network and calibrated mechanics:
 
 ```cpp
 const char* ssid     = "WIFI_SSID";
@@ -50,9 +66,9 @@ IPAddress local_IP(192, 168, 1, 50);  // Static IP Assignment
 IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 
-const int servoPin   = 1;   
-const int restAngle  = 180; // Idle clearance angle
-const int pressAngle = 156; // Physical actuation angle
+const int servoPin   = 1;  // GPIO pin connected to the servo signal wire
+const int restAngle  = 0;  // Insert your calibrated idle angle
+const int pressAngle = 30; // Insert your calibrated actuation angle
 
 ```
 

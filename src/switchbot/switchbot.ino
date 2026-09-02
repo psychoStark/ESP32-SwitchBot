@@ -30,8 +30,8 @@ IPAddress primaryDNS(192, 168, 1, 1);        // [CHANGE ME] DNS server (usually 
 
 // 4. Servo Motor Hardware Settings
 const int servoPin   = 1;                    // [CHANGE ME] GPIO pin connected to the servo signal wire
-const int restAngle  = 180;                  // [CHANGE ME] Idle angle (rest position, e.g., 180 or 0)
-const int pressAngle = 156;                  // [CHANGE ME] Action angle (physically presses the button)
+const int restAngle  = 0;                    // [CHANGE ME] Idle angle (rest position, e.g., 180 or 0)
+const int pressAngle = 30;                   // [CHANGE ME] Action angle (physically presses the button)
 const int holdTimeMs = 400;                  // [CHANGE ME] How long to hold the press (milliseconds)
 
 // 5. Time Zone and NTP Settings
