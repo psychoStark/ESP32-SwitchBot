@@ -1,0 +1,13 @@
+.pio
+.vscode/
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/c_cpp_properties.json
+src/.vscode
+.DS_Store
+Thumbs.db
+*~
+.*~
+*.log
+*.tmp
+*.temp
