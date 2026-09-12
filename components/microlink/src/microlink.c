@@ -304,6 +304,12 @@ esp_err_t microlink_start(microlink_t *ml) {
         return ESP_ERR_INVALID_STATE;
     }
 
+    /* Clear any lingering event bits (especially ML_EVT_SHUTDOWN_REQUEST) and queues */
+    xEventGroupClearBits(ml->events, 0x00FFFFFF);
+    if (ml->coord_cmd_queue) {
+        xQueueReset(ml->coord_cmd_queue);
+    }
+
     ml->state = ML_STATE_WIFI_WAIT;
 
     /* Set WiFi TX power if configured */

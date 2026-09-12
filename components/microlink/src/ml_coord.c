@@ -688,24 +688,24 @@ static int do_h2_preface(microlink_t *ml, ml_noise_state_t *noise) {
  * ========================================================================== */
 
 static void add_routable_ips(microlink_t *ml, cJSON *hostinfo) {
-    if (ml && hostinfo && ml->config.advertise_routes && ml->config.advertise_routes[0]) {
-        cJSON *routable = cJSON_CreateArray();
-        if (routable) {
-            char buf[128];
-            strncpy(buf, ml->config.advertise_routes, sizeof(buf) - 1);
-            buf[sizeof(buf) - 1] = '\0';
-            char *token = strtok(buf, ",");
-            while (token) {
-                while (*token == ' ') token++;
-                if (*token) {
-                    cJSON_AddItemToArray(routable, cJSON_CreateString(token));
-                }
-                token = strtok(NULL, ",");
+    if (!ml || !hostinfo) return;
+    cJSON *routable = cJSON_CreateArray();
+    if (!routable) return;
+    if (ml->config.advertise_routes && ml->config.advertise_routes[0]) {
+        char buf[128];
+        strncpy(buf, ml->config.advertise_routes, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        char *token = strtok(buf, ",");
+        while (token) {
+            while (*token == ' ') token++;
+            if (*token) {
+                cJSON_AddItemToArray(routable, cJSON_CreateString(token));
             }
-            cJSON_AddItemToObject(hostinfo, "RoutableIPs", routable);
-            ESP_LOGI(TAG, "Advertised routes: %s", ml->config.advertise_routes);
+            token = strtok(NULL, ",");
         }
+        ESP_LOGI(TAG, "Advertised routes: %s", ml->config.advertise_routes);
     }
+    cJSON_AddItemToObject(hostinfo, "RoutableIPs", routable);
 }
 
 static int do_register(microlink_t *ml, ml_noise_state_t *noise) {

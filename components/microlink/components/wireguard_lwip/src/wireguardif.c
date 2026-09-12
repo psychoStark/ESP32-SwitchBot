@@ -530,22 +530,15 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 
 								// 5. If the plaintext packet has not been dropped, it is inserted into the receive queue of the wg0 interface.
 								if (dest_ok) {
-									// Send packet to be processed by LWIP
+									// Send packet to be processed by LWIP via WireGuard netif (raw IP, not Ethernet)
 									struct netif *inp = device->netif;
-#if LWIP_IPV4
-									if (IPH_V(iphdr) == 4) {
-										struct netif *n;
-										for (n = netif_list; n != NULL; n = n->next) {
-											if (ip4_addr_cmp(ip_2_ip4(&dest), netif_ip4_addr(n))) {
-												inp = n;
-												break;
-											}
-										}
-									}
-#endif
 									WG_DEBUG("[WG_RX_IP] Passing %u bytes to IP layer (netif %c%c)\n",
 									       (unsigned)pbuf->tot_len, inp->name[0], inp->name[1]);
-									ip_input(pbuf, inp);
+									if (inp->input) {
+										inp->input(pbuf, inp);
+									} else {
+										ip_input(pbuf, inp);
+									}
 									// pbuf is owned by IP layer now
 									pbuf = NULL;
 								} else {
