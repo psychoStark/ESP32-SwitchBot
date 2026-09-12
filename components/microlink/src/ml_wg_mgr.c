@@ -254,12 +254,12 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
         uint8_t b = (ml->vpn_ip >> 16) & 0xFF;
         uint8_t c = (ml->vpn_ip >> 8) & 0xFF;
         uint8_t d = ml->vpn_ip & 0xFF;
-        IP4_ADDR(&netif->ip_addr.u_addr.ip4, a, b, c, d);
+        IP_ADDR4(&netif->ip_addr, a, b, c, d);
     } else {
-        IP4_ADDR(&netif->ip_addr.u_addr.ip4, 100, 64, 0, 1);  /* temp */
+        IP_ADDR4(&netif->ip_addr, 100, 64, 0, 1);  /* temp */
     }
-    IP4_ADDR(&netif->netmask.u_addr.ip4, 255, 192, 0, 0);     /* /10 */
-    IP4_ADDR(&netif->gw.u_addr.ip4, 0, 0, 0, 0);
+    IP_ADDR4(&netif->netmask, 255, 192, 0, 0);     /* /10 */
+    IP_ADDR4(&netif->gw, 0, 0, 0, 0);
 
     /* Use tcpip_input so decrypted packets are posted to the TCPIP thread.
      * Required for TCP (esp_http_server sockets) — ip_input from the wg_mgr
@@ -342,7 +342,8 @@ static void wg_update_vpn_ip(microlink_t *ml) {
         uint8_t b = (ml->vpn_ip >> 16) & 0xFF;
         uint8_t c = (ml->vpn_ip >> 8) & 0xFF;
         uint8_t d = ml->vpn_ip & 0xFF;
-        IP4_ADDR(&netif->ip_addr.u_addr.ip4, a, b, c, d);
+        IP_ADDR4(&netif->ip_addr, a, b, c, d);
+        IP_ADDR4(&netif->netmask, 255, 192, 0, 0);
     }
 }
 
@@ -1545,6 +1546,17 @@ void ml_wg_mgr_task(void *arg) {
     bool stun_cmm_sent = false;  /* One-shot: send CMMs after first STUN result */
 
     while (!(xEventGroupGetBits(ml->events) & ML_EVT_SHUTDOWN_REQUEST)) {
+        /* Keep VPN IP in sync if coord learned or updated it */
+        if (ml->vpn_ip != 0 && ml->wg_netif) {
+            struct netif *n = (struct netif *)ml->wg_netif;
+            if (ip4_addr_get_u32(netif_ip4_addr(n)) != PP_HTONL(ml->vpn_ip)) {
+                wg_update_vpn_ip(ml);
+                char ip_str[16];
+                microlink_ip_to_str(ml->vpn_ip, ip_str);
+                ESP_LOGI(TAG, "Synchronized wg_netif IP to %s", ip_str);
+            }
+        }
+
         /* Process peer updates from coord task */
         process_peer_updates(ml);
 
