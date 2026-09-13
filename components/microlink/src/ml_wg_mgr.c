@@ -1640,9 +1640,9 @@ void ml_wg_mgr_task(void *arg) {
             ESP_LOGI(TAG, "wireguardif_periodic: %llu ms", (unsigned long long)dt);
         }
 
-        /* Periodic DISCO probes (every 1s check) */
+        /* Periodic DISCO probes (every 3s check to reduce cryptographic packet frequency) */
         now = ml_get_time_ms();
-        if (now - last_disco_probe_ms > 1000) {
+        if (now - last_disco_probe_ms > 3000) {
             uint64_t t0 = now;
             disco_periodic_probes(ml);
             uint64_t dt = ml_get_time_ms() - t0;

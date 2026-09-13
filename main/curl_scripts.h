@@ -9,13 +9,36 @@
  * @param otaKey The OTA gate key string
  * @return String Containing the bash interactive dashboard script
  */
+// Generates the interactive terminal dashboard script streamed to curl users
 inline String generateCurlDashboardScript(const String &host, const char *otaKey) {
-  const size_t n = 4600;
+  const size_t n = 4800;
   std::unique_ptr<char[]> buf(new char[n]);
+  // Check if an OTA password was set so we know whether to ask for one
+  int hasKey = (otaKey != nullptr && otaKey[0] != '\0') ? 1 : 0;
   snprintf(buf.get(), n,
     "#!/bin/bash\n"
     "HOST=\"%s\"\n"
-    "OTAKEY=\"%s\"\n"
+    "HAS_OTAKEY=%d\n"
+    "# Function to prompt for password and unlock wireless updates for 10 minutes\n"
+    "do_enable_ota() {\n"
+    "  if [[ \"$HAS_OTAKEY\" == \"1\" ]]; then\n"
+    "    echo ''\n"
+    "    # Wait for the user to type their key on the physical keyboard\n"
+    "    read -s -p 'Enter OTA Key: ' ota_k </dev/tty\n"
+    "    echo ''\n"
+    "    RESP=$(curl -s -w '%%{http_code}' -o /dev/null -X POST http://$HOST/ota/enable -d \"key=$ota_k\")\n"
+    "    if [[ \"$RESP\" == \"302\" || \"$RESP\" == \"200\" ]]; then\n"
+    "      echo 'OTA Enabled (10 min).'\n"
+    "    else\n"
+    "      echo 'Invalid OTA Key.'\n"
+    "    fi\n"
+    "  else\n"
+    "    curl -X POST -s http://$HOST/ota/enable\n"
+    "    echo 'OTA Enabled (10 min).'\n"
+    "  fi\n"
+    "  sleep 1.5\n"
+    "}\n"
+    "# Main dashboard loop: shows options and listens for single keystrokes\n"
     "while true; do\n"
     "  clear\n"
     "  LIVE=$(curl -s http://$HOST/api/live 2>/dev/null)\n"
@@ -80,14 +103,15 @@ inline String generateCurlDashboardScript(const String &host, const char *otaKey
     "      fi\n"
     "      CAL_SUB=$(echo \"$LIVE_SUB\" | grep -o '\"cal\":[01]' | cut -d: -f2)\n"
     "      if [[ \"$CAL_SUB\" == \"1\" ]]; then\n"
-    "        CAL_SUB_LBL=\" | [S] Recalibrate\"\n"
+    "        CAL_LINE=\" [S] Recalibrate\"\n"
     "      else\n"
-    "        CAL_SUB_LBL=\"\"\n"
+    "        CAL_LINE=\"\"\n"
     "      fi\n"
     "      echo \"$OUT\"\n"
     "      echo \"\"\n"
     "      echo -e \" [Enter] Refresh  | [B] Back    | [X] Exit\"\n"
-    "      echo -e \" [C] Clear Logs   | [R] Reboot$CAL_SUB_LBL  | $OTA_LBL\"\n"
+    "      echo -e \" [C] Clear Logs   | [R] Reboot  | $OTA_LBL\"\n"
+    "      if [[ -n \"$CAL_LINE\" ]]; then echo -e \"$CAL_LINE\"; fi\n"
     "      key=\"\"\n"
     "      read -n 1 -s key </dev/tty\n"
     "      if [[ \"$key\" == \"b\" || \"$key\" == \"B\" ]]; then break; fi\n"
@@ -104,11 +128,10 @@ inline String generateCurlDashboardScript(const String &host, const char *otaKey
     "        if [[ \"$OTA_SUB\" == \"1\" ]]; then\n"
     "          curl -X POST -s http://$HOST/ota/disable\n"
     "          echo 'OTA Disabled.'\n"
+    "          sleep 1\n"
     "        else\n"
-    "          curl -X POST -s http://$HOST/ota/enable -d \"key=$OTAKEY\"\n"
-    "          echo 'OTA Enabled.'\n"
+    "          do_enable_ota\n"
     "        fi\n"
-    "        sleep 1\n"
     "      fi\n"
     "    done\n"
     "  elif [[ \"$opt\" == \"c\" || \"$opt\" == \"C\" ]]; then\n"
@@ -118,17 +141,16 @@ inline String generateCurlDashboardScript(const String &host, const char *otaKey
     "    if [[ \"$OTA_ON\" == \"1\" ]]; then\n"
     "      curl -X POST -s http://$HOST/ota/disable\n"
     "      echo 'OTA Disabled.'\n"
+    "      sleep 1.5\n"
     "    else\n"
-    "      curl -X POST -s http://$HOST/ota/enable -d \"key=$OTAKEY\"\n"
-    "      echo 'OTA Enabled.'\n"
+    "      do_enable_ota\n"
     "    fi\n"
-    "    sleep 1.5\n"
     "  elif [[ \"$opt\" == \"r\" || \"$opt\" == \"R\" ]]; then\n"
     "    curl -X POST -s http://$HOST/reboot\n"
     "    exit 0\n"
     "  fi\n"
     "done\n",
-    host.c_str(), otaKey
+    host.c_str(), hasKey
   );
   return String(buf.get());
 }

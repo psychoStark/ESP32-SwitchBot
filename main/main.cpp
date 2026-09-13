@@ -6,6 +6,8 @@
 #include <ArduinoOTA.h>
 #include <Preferences.h>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
+#include "soc/soc_caps.h"
 #include <time.h>
 #include <memory>
 #include <sys/socket.h>
@@ -26,47 +28,50 @@ extern "C" {
   #include "esp_crt_bundle.h"
   #include "mdns.h"
   #include "lwip/dns.h"
+  #include "esp_pm.h"
+  #include "esp_wifi.h"
 }
 
 // --- Configuration ---
 const char* ssid     = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
 
+// Change this static IP and gateway to match your home router's subnet if needed
 IPAddress local_IP(192, 168, 1, 50);
 IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 IPAddress primaryDNS(1, 1, 1, 1);
 IPAddress secondaryDNS(8, 8, 8, 8);
 
+// Change this GPIO pin number if your servo signal wire is connected elsewhere
 const int servoPin   = 1;
 int restAngle        = DEFAULT_REST_ANGLE;
 int pressAngle       = DEFAULT_PRESS_ANGLE;
 int pressDurationMs  = DEFAULT_PRESS_DURATION_MS;
 bool isCalibrated    = false;
 
-// OTA gate key - shown embedded in the /debug page's "Enable OTA" form and in
-// the curl menu. This is obscurity, not real auth - the device already
-// assumes a trusted local network (same tier as the WiFi password / Tailscale
-// auth key). Defined in secrets.h as OTA_KEY - every reference to OTA_KEY
-// below picks it up from there automatically.
-const unsigned long OTA_AUTO_TIMEOUT_MS = 10UL * 60UL * 1000UL; // auto-disable after 10 min
+// OTA gate key - Defined in secrets.h as OTA_KEY.
+// If OTA_KEY is non-empty, the user must explicitly provide the key to open the 10-minute
+// OTA portal (via password prompt in Web and cURL). The key is never leaked into HTML or scripts.
+// If OTA_KEY is empty (""), the portal opens with a single click without requesting a password.
+// Automatically close the wireless update window after 10 minutes for safety
+const unsigned long OTA_AUTO_TIMEOUT_MS = 10UL * 60UL * 1000UL;
 
-// How often we persist a "last known alive" heartbeat to NVS, used to
-// estimate downtime between sessions. Shorter = tighter downtime estimate,
-// more (still very cheap) flash writes.
-const unsigned long HEARTBEAT_INTERVAL_MS = 30UL * 1000UL; // 30 seconds
+// How often to save a heartbeat timestamp to flash to measure power outage downtime
+const unsigned long HEARTBEAT_INTERVAL_MS = 60UL * 1000UL; // 60 seconds
 
 Servo myservo;
 WebServer server(80);
 Preferences prefs;
 
 uint32_t last_press_time = 0;
+// Minimum time to wait between button presses to protect the motor
 const uint32_t PRESS_COOLDOWN_MS = 2000;
 
-// Async servo trigger: handleRoot() sets this flag and immediately returns the
-// HTTP 200 response. loop() picks it up and fires the servo without blocking
-// the TCP connection through the 700ms servo motion.
+// Signals the background worker to move the servo without freezing web requests
 static volatile bool pendingPress = false;
+static TaskHandle_t loopTaskHandle = nullptr;
+static String s_cachedSubnetDeviceId = "";
 
 uint32_t first_boot_epoch = 0;
 uint32_t boot_time_ms = 0;
@@ -98,9 +103,9 @@ unsigned long lastTempMs = 0;
 unsigned long lastPowerMs = 0;
 
 // --- Crash logging: ring buffer over individual NVS keys ---
-// Each slot is its own NVS key ("b0".."b49"), so a boot only touches
+// Each slot is its own NVS key ("b0".."b24"), so a boot only touches
 // boot_cnt, w_idx, and one slot key - not the whole history blob.
-const int MAX_BOOT_LOGS = 50;
+const int MAX_BOOT_LOGS = 25;
 struct BootLog {
   uint32_t timestamp;   // Unix timestamp of boot event (0 = empty/no NTP yet)
   uint32_t downtimeSec; // Approx downtime seconds before this boot (0 = unknown/first)
@@ -111,7 +116,7 @@ uint32_t bootWriteIdx = 0;          // next physical slot to write
 uint32_t totalBootCount = 0;
 
 // --- Servo trigger logging: NVS ring buffer ---
-const int MAX_SERVO_LOGS = 20;
+const int MAX_SERVO_LOGS = 15;
 struct ServoLog {
   uint32_t timestamp;  // Unix epoch (0 = pre-NTP)
   uint8_t  fromCurl;   // 1 if triggered via curl, 0 if web
@@ -121,7 +126,7 @@ uint32_t servoWriteIdx = 0;
 uint32_t servoLogCount = 0;
 
 // --- Tailscale session logging: NVS ring buffer ---
-const int MAX_TAILSCALE_LOGS = 20;
+const int MAX_TAILSCALE_LOGS = 10;
 struct TailscaleLog {
   uint32_t startTime;   // Unix epoch when Tailscale connection started (0 = pre-NTP)
   uint32_t endTime;     // Unix epoch when Tailscale connection ended/standby (0 = still active)
@@ -269,7 +274,13 @@ void loadServoHistory() {
 void recordServoTrigger(bool curl) {
   time_t now; time(&now);
   ServoLog entry;
-  entry.timestamp = (now > 1600000000UL) ? (uint32_t)now : 0;
+  if (now > 1600000000UL) {
+    entry.timestamp = (uint32_t)now;
+  } else if (first_boot_epoch > 0) {
+    entry.timestamp = first_boot_epoch + (millis() / 1000);
+  } else {
+    entry.timestamp = 0;
+  }
   entry.fromCurl = curl ? 1 : 0;
 
   prefs.begin("servo_log", false);
@@ -354,6 +365,12 @@ void recordTailscaleStart() {
 
   prefs.begin("ts_log", false);
   uint32_t lastStop = prefs.getUInt("t_stop", 0);
+  if (lastStop == 0 && tailscaleLogCount > 0) {
+    uint32_t prevSlot = ((int)tailscaleWriteIdx - 1 + MAX_TAILSCALE_LOGS) % MAX_TAILSCALE_LOGS;
+    if (tailscaleHistory[prevSlot].endTime > 0) {
+      lastStop = tailscaleHistory[prevSlot].endTime;
+    }
+  }
   uint32_t downtime = 0;
   if (nowEpoch > 0 && lastStop > 0 && nowEpoch > lastStop) {
     downtime = nowEpoch - lastStop;
@@ -479,6 +496,19 @@ void syncTimeIfNeeded() {
         }
       }
 
+      // If any Servo trigger occurred before NTP synced, fix its timestamp
+      if (servoLogCount > 0) {
+        prefs.begin("servo_log", false);
+        for (int i = 0; i < MAX_SERVO_LOGS && i < (int)servoLogCount; i++) {
+          if (servoHistory[i].timestamp < 1600000000UL) {
+            servoHistory[i].timestamp = thisBootEpoch;
+            char key[6]; snprintf(key, sizeof(key), "s%u", (unsigned)i);
+            prefs.putBytes(key, &servoHistory[i], sizeof(ServoLog));
+          }
+        }
+        prefs.end();
+      }
+
       // --- Downtime estimate: compare against the last heartbeat the
       // previous session managed to write before it died. ---
       if (!last_off_computed) {
@@ -546,9 +576,9 @@ void formatDuration(uint64_t totalSec, char* buffer, size_t maxLen) {
 
 void formatMs(uint32_t ms, char* buffer, size_t maxLen) {
   if (ms >= 1000) {
-    snprintf(buffer, maxLen, "%.2f s", (float)ms / 1000.0f);
+    snprintf(buffer, maxLen, "%.2fs", (float)ms / 1000.0f);
   } else {
-    snprintf(buffer, maxLen, "%lu ms", (unsigned long)ms);
+    snprintf(buffer, maxLen, "%lums", (unsigned long)ms);
   }
 }
 
@@ -605,7 +635,11 @@ void stopOTA() {
 
 void updateSensorCache() {
   unsigned long now = millis();
-  if (now - lastTempMs >= 2000) { cachedTemp = temperatureRead(); lastTempMs = now; }
+#if defined(SOC_TEMP_SENSOR_SUPPORTED) && SOC_TEMP_SENSOR_SUPPORTED
+  if (now - lastTempMs >= 2000) { cachedTemp = roundf(temperatureRead()); lastTempMs = now; }
+#else
+  cachedTemp = -999.0f; // placeholder for chips without hardware temp sensor
+#endif
   if (now - lastPowerMs >= 5000) { cachedPower = getEstimatedPowerW(); lastPowerMs = now; }
 }
 
@@ -675,9 +709,9 @@ String getDerpRegionName() {
   }
 }
 
-String getConnectionType() {
-  if (mlStandbyMode && !mlRunning) return "Subnet Active";
-  if (ml == nullptr || !mlRunning || !microlink_is_connected(ml)) return "Not Connected";
+void getConnectionType(char* out, size_t maxLen) {
+  if (mlStandbyMode && !mlRunning) { snprintf(out, maxLen, "Subnet Active"); return; }
+  if (ml == nullptr || !mlRunning || !microlink_is_connected(ml)) { snprintf(out, maxLen, "Not Connected"); return; }
   int count = microlink_get_peer_count(ml);
   bool foundDirect = false;
   bool foundRelayed = false;
@@ -690,13 +724,20 @@ String getConnectionType() {
   }
   String reg = getDerpRegionName();
   if (foundDirect && foundRelayed) {
-    return reg.length() ? "Mixed (" + reg + ")" : "Mixed";
+    if (reg.length()) snprintf(out, maxLen, "Mixed (%s)", reg.c_str());
+    else snprintf(out, maxLen, "Mixed");
+  } else if (foundDirect) {
+    snprintf(out, maxLen, "Direct (UDP)");
+  } else {
+    if (reg.length()) snprintf(out, maxLen, "Relayed (%s)", reg.c_str());
+    else snprintf(out, maxLen, "Relayed");
   }
-  if (foundDirect) return "Direct (UDP)";
-  if (foundRelayed) {
-    return reg.length() ? "Relayed (" + reg + ")" : "Relayed";
-  }
-  return reg.length() ? "Relayed (" + reg + ")" : "Relayed";
+}
+
+String getConnectionType() {
+  char b[48];
+  getConnectionType(b, sizeof(b));
+  return String(b);
 }
 
 const char* getResetReasonClass(esp_reset_reason_t reason) {
@@ -748,12 +789,16 @@ bool checkTailscaleSubnetRouterOnline(const char* apiKey, const char* deviceIden
     if (!isdigit((unsigned char)deviceIdent[i])) { isNumeric = false; break; }
   }
 
-  String url = isNumeric
-    ? ("https://api.tailscale.com/api/v2/device/" + String(deviceIdent))
+  // Use cached device ID if available to query the compact single-device endpoint (~400 bytes vs 30KB full fleet inventory)
+  bool usingDirectDeviceEndpoint = isNumeric || (s_cachedSubnetDeviceId.length() > 0);
+  String targetId = isNumeric ? String(deviceIdent) : (s_cachedSubnetDeviceId.length() > 0 ? s_cachedSubnetDeviceId : "");
+
+  String url = usingDirectDeviceEndpoint
+    ? ("https://api.tailscale.com/api/v2/device/" + targetId)
     : "https://api.tailscale.com/api/v2/tailnet/-/devices";
 
   String payload;
-  payload.reserve(isNumeric ? 2048 : 8192);
+  payload.reserve(usingDirectDeviceEndpoint ? 1024 : 8192);
 
   esp_http_client_config_t config = {};
   config.url = url.c_str();
@@ -780,12 +825,18 @@ bool checkTailscaleSubnetRouterOnline(const char* apiKey, const char* deviceIden
   s_lastApiHttpStatus = httpCode;
   s_lastApiCheckMs = millis();
 
+  // If query using cached ID failed with 404, invalidate cache so next cycle rediscovers via /tailnet/-/devices
+  if (usingDirectDeviceEndpoint && !isNumeric && httpCode == 404) {
+    ESP_LOGW("watchdog", "Cached device ID %s returned 404; clearing cache to re-discover", s_cachedSubnetDeviceId.c_str());
+    s_cachedSubnetDeviceId = "";
+  }
+
   bool isConnected = false;
 
   if (err == ESP_OK && httpCode == 200 && payload.length() > 0) {
     cJSON *root = cJSON_Parse(payload.c_str());
     if (root != nullptr) {
-      if (isNumeric) {
+      if (usingDirectDeviceEndpoint) {
         cJSON *conn = cJSON_GetObjectItem(root, "connectedToControl");
         if (cJSON_IsBool(conn)) {
           isConnected = cJSON_IsTrue(conn);
@@ -806,6 +857,11 @@ bool checkTailscaleSubnetRouterOnline(const char* apiKey, const char* deviceIden
               if (cJSON_IsBool(conn)) {
                 isConnected = cJSON_IsTrue(conn);
               }
+              cJSON *nodeId = cJSON_GetObjectItem(dev, "id");
+              if (nodeId && cJSON_IsString(nodeId) && nodeId->valuestring && strlen(nodeId->valuestring) > 0) {
+                s_cachedSubnetDeviceId = String(nodeId->valuestring);
+                ESP_LOGI("watchdog", "Cached numeric Tailscale device ID for '%s': %s", deviceIdent, s_cachedSubnetDeviceId.c_str());
+              }
               break;
             }
           }
@@ -825,7 +881,9 @@ bool checkTailscaleSubnetRouterOnline(const char* apiKey, const char* deviceIden
 
 // --- Routes ---
 
+// Handles button press requests: sends an immediate reply then moves the servo
 void handleRoot() {
+  // If not yet calibrated, direct the user to the calibration wizard
   if (!isCalibrated) {
     server.sendHeader("Connection", "close");
     if (isCurl()) {
@@ -842,6 +900,7 @@ void handleRoot() {
   }
 
   uint32_t now = millis();
+  // Prevent rapid clicks to protect the motor from overheating
   if (now - last_press_time < PRESS_COOLDOWN_MS) {
     server.sendHeader("Connection", "close");
     server.send(429, "text/plain; charset=utf-8", "Cooldown active.\n");
@@ -849,9 +908,13 @@ void handleRoot() {
   }
   last_press_time = now;
   bool curlReq = isCurl();
+  // Save this button press to the history log in flash memory
   recordServoTrigger(curlReq);
-  pendingPress = true;  // loop() will fire the servo; respond first so TCP
-                        // doesn't sit open through the 700ms motion delay.
+  // Tell the background worker to move the motor and wake it up immediately
+  pendingPress = true;
+  if (loopTaskHandle != nullptr) {
+    xTaskNotifyGive(loopTaskHandle);
+  }
 
   char upBuf[32]; formatDuration(esp_timer_get_time() / 1000000ULL, upBuf, sizeof(upBuf));
 
@@ -865,13 +928,12 @@ void handleRoot() {
     snprintf(body, sizeof(body),
       "<h1>&#9889; Success</h1>"
       "<div class='card'>"
-      "<div class='row'><span class='k'>Servo tap</span><span class='v ok'>Queued</span></div>"
-      "<div class='row'><span class='k'>ESP uptime</span><span class='v mono'>%s</span></div>"
+      "<div class='row'><span class='k'>Servo Tap</span><span class='v ok'>Queued</span></div>"
+      "<div class='row'><span class='k'>ESP Uptime</span><span class='v mono'>%s</span></div>"
       "</div>"
-      "<a class='back' href='/main'>&larr; Back to dashboard</a>",
+      "<a class='back' href='/main'>&larr; Back to Dashboard</a>",
       upBuf);
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/html; charset=utf-8", wrapPage("SwitchBot Trigger", "&#9889;", body, "", true));
+    sendWrappedPage(server, "SwitchBot Trigger", "&#9889;", body, "", true);
   }
 }
 
@@ -894,8 +956,7 @@ void handleMain() {
       "<a href='/info'>&#128187; Device Info</a>"
       "<a href='/debug'>&#128295; Logs &amp; Debug</a>"
       "</div>";
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/html; charset=utf-8", wrapPage("SwitchBot Dashboard", "&#127920;", body.c_str(), "", true));
+    sendWrappedPage(server, "SwitchBot Dashboard", "&#127920;", body.c_str(), "", true);
   }
 }
 
@@ -904,42 +965,76 @@ void handleInfo() {
   uint32_t ramFree = ESP.getFreeHeap() / 1024;
   uint32_t flashTotal = ESP.getFlashChipSize() / 1024;
   uint32_t flashUsed = ESP.getSketchSize() / 1024;
-  uint32_t psramTotal = ESP.getPsramSize() / 1024;
-  uint32_t psramFree = ESP.getFreePsram() / 1024;
+  uint32_t psramTotal = heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / 1024;
+  uint32_t psramFree = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024;
   updateSensorCache(); // make sure there's a real reading before the first poll tick
 
   bool vpnConn = (ml != nullptr) && mlRunning && microlink_is_connected(ml);
-  String vpnIp = "Not Valid";
+  char vpnIpBuf[16] = "Not Valid";
   if (vpnConn) {
     uint32_t rawIp = microlink_get_vpn_ip(ml);
     if (rawIp != 0) {
-      char ipBuf[16];
-      snprintf(ipBuf, sizeof(ipBuf), "%lu.%lu.%lu.%lu",
+      snprintf(vpnIpBuf, sizeof(vpnIpBuf), "%lu.%lu.%lu.%lu",
         (unsigned long)((rawIp >> 24) & 0xFF), (unsigned long)((rawIp >> 16) & 0xFF),
         (unsigned long)((rawIp >> 8) & 0xFF), (unsigned long)(rawIp & 0xFF));
-      vpnIp = String(ipBuf);
     }
   }
-  String connType = getConnectionType();
-  const char* tailscaleStatus = vpnConn ? "CONNECTED" : (mlStandbyMode ? "STANDBY" : "Not Connected");
+  char connTypeBuf[48];
+  getConnectionType(connTypeBuf, sizeof(connTypeBuf));
+  const char* tailscaleStatus = vpnConn ? "Connected" : (mlStandbyMode ? "Standby" : "Not Connected");
   const char* tailscalePillClass = vpnConn ? "on" : (mlStandbyMode ? "standby" : "off");
   const char* tailscalePillText = vpnConn ? "Connected" : (mlStandbyMode ? "Standby" : "Not Connected");
 
+  char tempBuf[16];
+  if (cachedTemp > -50.0f) {
+    snprintf(tempBuf, sizeof(tempBuf), "%.0f C", cachedTemp);
+  } else {
+    snprintf(tempBuf, sizeof(tempBuf), "-");
+  }
+
+  bool hasTemp = (cachedTemp > -50.0f);
+  bool hasTsIp = (vpnConn && vpnIpBuf[0] != '-' && strcmp(vpnIpBuf, "Not Valid") != 0);
+
   if (isCurl()) {
     char upBuf[32]; formatDuration(esp_timer_get_time() / 1000000ULL, upBuf, sizeof(upBuf));
+    char cpuBuf[32]; snprintf(cpuBuf, sizeof(cpuBuf), "%lu MHz", (unsigned long)ESP.getCpuFreqMHz());
     const size_t n = 1500;
     std::unique_ptr<char[]> out(new char[n]);
-    snprintf(out.get(), n,
+    int off = snprintf(out.get(), n,
       "==================================================\n"
       " [i] ESP32-S3 DEVICE INFO\n"
       "==================================================\n"
-      " Uptime     : %-15s | Temp  : %.1f C\n"
-      " CPU Clock  : %lu MHz          | Power : ~%.2f W\n"
+    );
+    if (hasTemp) {
+      off += snprintf(out.get() + off, n - off,
+        " Uptime     : %-12s | Temp.  : %-7s\n"
+        " CPU Clock  : %-12s | Power  : ~%.2f W\n",
+        upBuf, tempBuf,
+        cpuBuf, cachedPower
+      );
+    } else {
+      off += snprintf(out.get() + off, n - off,
+        " Uptime     : %-12s | Power  : ~%.2f W\n"
+        " CPU Clock  : %-12s\n",
+        upBuf, cachedPower,
+        cpuBuf
+      );
+    }
+    off += snprintf(out.get() + off, n - off,
       " Device     : ESP32-S3-WROOM-N16R8 DOIT\n"
       "--------------------------------------------------\n"
       " RAM Used   : %lu/%lu KB\n"
-      " Flash Used : %lu/%lu KB\n"
-      " PSRAM Used : %lu/%lu KB\n"
+      " Flash Used : %lu/%lu KB\n",
+      (ramTotal - ramFree), ramTotal,
+      flashUsed, flashTotal
+    );
+    if (psramTotal > 0) {
+      off += snprintf(out.get() + off, n - off,
+        " PSRAM Used : %lu/%lu KB\n",
+        (unsigned long)(psramTotal - psramFree), (unsigned long)psramTotal
+      );
+    }
+    off += snprintf(out.get() + off, n - off,
       "--------------------------------------------------\n"
       " Wi-Fi SSID : %s\n"
       " IP Address : %s (esp32.local)\n"
@@ -947,68 +1042,96 @@ void handleInfo() {
       "--------------------------------------------------\n"
       " [ TAILSCALE ]\n"
       " Status     : %s\n"
-      " Hostname   : %s\n"
-      " IP Address : %s\n"
-      " Connection : %s\n"
-      "==================================================",
-      upBuf, cachedTemp,
-      ESP.getCpuFreqMHz(), cachedPower,
-      (ramTotal - ramFree), ramTotal,
-      flashUsed, flashTotal,
-      (psramTotal > 0 ? psramTotal - psramFree : 0), psramTotal,
+      " Hostname   : %s\n",
       WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
       tailscaleStatus,
-      TAILSCALE_HOST,
-      vpnIp.c_str(),
-      connType.c_str()
+      TAILSCALE_HOST
+    );
+    if (hasTsIp) {
+      off += snprintf(out.get() + off, n - off,
+        " IP Address : %s\n",
+        vpnIpBuf
+      );
+    }
+    off += snprintf(out.get() + off, n - off,
+      " Connection : %s\n"
+      "==================================================",
+      connTypeBuf
     );
     server.sendHeader("Connection", "close");
     server.send(200, "text/plain; charset=utf-8", out.get());
   } else {
-    const size_t n = 3600;
-    std::unique_ptr<char[]> body(new char[n]);
-    snprintf(body.get(), n,
-      "<h1>&#128187; Device Info</h1>"
-      "<h3>Live</h3>"
-      "<div class='card'>"
-      "<div class='row'><span class='k'>Uptime</span><span class='v mono' id='up'>--</span></div>"
-      "<div class='row'><span class='k'>CPU temp</span><span class='v mono' id='tmp'>--</span></div>"
-      "<div class='row'><span class='k'>CPU clock</span><span class='v mono' id='clk'>--</span></div>"
-      "<div class='row'><span class='k'>Est. power</span><span class='v mono' id='pwr'>--</span></div>"
-      "<div class='row'><span class='k'>RAM used</span><span class='v mono' id='ram'>--</span></div>"
-      "</div>"
-      "<h3>Hardware</h3>"
-      "<div class='card'>"
-      "<div class='row'><span class='k'>Device</span><span class='v'>ESP32-S3-WROOM-N16R8</span></div>"
-      "<div class='row'><span class='k'>Flash</span><span class='v mono'>%lu/%lu KB</span></div>"
-      "<div class='row'><span class='k'>PSRAM</span><span class='v mono'>%lu/%lu KB</span></div>"
-      "</div>"
-      "<h3>Network</h3>"
-      "<div class='card'>"
-      "<div class='row'><span class='k'>SSID</span><span class='v'>%s</span></div>"
-      "<div class='row'><span class='k'>IP</span><span class='v mono'>%s</span></div>"
-      "<div class='row'><span class='k'>Hostname</span><span class='v mono'>esp32.local</span></div>"
-      "</div>"
-      "<h3>Tailscale</h3>"
-      "<div class='card'>"
-      "<div class='row'><span class='k'>Status</span>"
-      "<span class='v'><span class='pill %s' id='ts-pill'>%s</span></span></div>"
-      "<div class='row'><span class='k'>Hostname</span><span class='v mono'>%s</span></div>"
-      "<div class='row'><span class='k'>IP</span><span class='v mono' id='ts-ip'>%s</span></div>"
-      "<div class='row'><span class='k'>Connection</span><span class='v mono' id='ts-conn'>%s</span></div>"
-      "</div>"
-      "<a class='back' href='/main'>&larr; Back to dashboard</a>",
-      flashUsed, flashTotal, (psramTotal > 0 ? psramTotal - psramFree : 0), psramTotal,
-      WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
-      tailscalePillClass, tailscalePillText,
-      TAILSCALE_HOST,
-      vpnIp.c_str(),
-      connType.c_str()
-    );
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/html; charset=utf-8", wrapPage("Device Info", "&#128187;", body.get(), POLL_SCRIPT));
-  }
+    sendWrappedPageStream(server, "Device Info", "&#128187;", [&]() {
+      char b1[600];
+      int off1 = snprintf(b1, sizeof(b1),
+        "<h1>&#128187; Device Info</h1>"
+        "<h3>Live</h3>"
+        "<div class='card'>"
+        "<div class='row'><span class='k'>Uptime</span><span class='v mono' id='up'>--</span></div>"
+        "<div class='row'><span class='k'>CPU Clock</span><span class='v mono' id='clk'>%lu MHz</span></div>",
+        (unsigned long)ESP.getCpuFreqMHz()
+      );
+      if (hasTemp) {
+        off1 += snprintf(b1 + off1, sizeof(b1) - off1,
+          "<div class='row'><span class='k'>CPU Temp.</span><span class='v mono' id='tmp'>%.0f &deg;C</span></div>",
+          cachedTemp
+        );
+      }
+      snprintf(b1 + off1, sizeof(b1) - off1,
+        "<div class='row'><span class='k'>Est. Power</span><span class='v mono' id='pwr'>~%.2f W</span></div>"
+        "</div>",
+        cachedPower
+      );
+      server.sendContent(b1);
 
+      char b2[800];
+      int off2 = snprintf(b2, sizeof(b2),
+        "<h3>Storage &amp; Memory</h3>"
+        "<div class='card'>"
+        "<div class='row'><span class='k'>RAM</span><span class='v mono' id='ram'>%lu/%lu KB</span></div>"
+        "<div class='row'><span class='k'>Flash</span><span class='v mono'>%lu/%lu KB</span></div>",
+        (ramTotal - ramFree), ramTotal,
+        flashUsed, flashTotal
+      );
+      if (psramTotal > 0) {
+        off2 += snprintf(b2 + off2, sizeof(b2) - off2,
+          "<div class='row'><span class='k'>PSRAM</span><span class='v mono'>%lu/%lu KB</span></div>",
+          (unsigned long)(psramTotal - psramFree), (unsigned long)psramTotal
+        );
+      }
+      snprintf(b2 + off2, sizeof(b2) - off2,
+        "</div>"
+        "<h3>Network &amp; Connectivity</h3>"
+        "<div class='card'>"
+        "<div class='row'><span class='k'>Wi-Fi SSID</span><span class='v mono'>%s</span></div>"
+        "<div class='row'><span class='k'>IP Address</span><span class='v mono'>%s</span></div>"
+        "<div class='row'><span class='k'>Hostname</span><span class='v mono'>esp32.local</span></div>"
+        "</div>",
+        WiFi.SSID().c_str(),
+        WiFi.localIP().toString().c_str()
+      );
+      server.sendContent(b2);
+
+      char b3[600];
+      snprintf(b3, sizeof(b3),
+        "<h3>Tailscale</h3>"
+        "<div class='card'>"
+        "<div class='row'><span class='k'>Status</span>"
+        "<span class='v'><span class='pill %s' id='ts-pill'>%s</span></span></div>"
+        "<div class='row'><span class='k'>Hostname</span><span class='v mono'>%s</span></div>"
+        "<div class='row' id='ts-ip-row'%s><span class='k'>IP Address</span><span class='v mono' id='ts-ip'>%s</span></div>"
+        "<div class='row'><span class='k'>Connection</span><span class='v mono' id='ts-conn'>%s</span></div>"
+        "</div>"
+        "<a class='back' href='/main'>&larr; Back to Dashboard</a>",
+        tailscalePillClass, tailscalePillText,
+        TAILSCALE_HOST,
+        hasTsIp ? "" : " style='display:none;'",
+        vpnIpBuf,
+        connTypeBuf
+      );
+      server.sendContent(b3);
+    }, POLL_SCRIPT);
+  }
 }
 
 void handleApiLive() {
@@ -1041,18 +1164,17 @@ void handleApiLive() {
   }
 
   bool vpnConn = (ml != nullptr) && mlRunning && microlink_is_connected(ml);
-  String vpnIp = "-";
+  char vpnIpBuf[16] = "-";
   if (vpnConn) {
     uint32_t rawIp = microlink_get_vpn_ip(ml);
     if (rawIp != 0) {
-      char ipBuf[16];
-      snprintf(ipBuf, sizeof(ipBuf), "%lu.%lu.%lu.%lu",
+      snprintf(vpnIpBuf, sizeof(vpnIpBuf), "%lu.%lu.%lu.%lu",
         (unsigned long)((rawIp >> 24) & 0xFF), (unsigned long)((rawIp >> 16) & 0xFF),
         (unsigned long)((rawIp >> 8) & 0xFF), (unsigned long)(rawIp & 0xFF));
-      vpnIp = String(ipBuf);
     }
   }
-  String connType = getConnectionType();
+  char connTypeBuf[48];
+  getConnectionType(connTypeBuf, sizeof(connTypeBuf));
   const char* tsSt = vpnConn ? "Connected" : (mlStandbyMode ? "Standby" : "Not Connected");
   const char* tsCls = vpnConn ? "on" : (mlStandbyMode ? "standby" : "off");
 
@@ -1063,10 +1185,10 @@ void handleApiLive() {
 
   char json[700];
   snprintf(json, sizeof(json),
-    "{\"u\":\"%s\",\"uf\":\"%s\",\"t\":%.1f,\"ru\":%lu,\"rt\":%lu,\"c\":%lu,\"p\":%.2f,\"ota\":%d,\"sl\":%lu,\"st\":%lu,\"sc\":%lu,\"ts\":%lu,\"ts_st\":\"%s\",\"ts_cls\":\"%s\",\"ts_ip\":\"%s\",\"ts_conn\":\"%s\",\"ts_cm\":%lu,\"ts_cs\":\"%s\",\"cal\":%d,\"s_rest\":%d,\"s_press\":%d,\"s_dur\":%d}",
+    "{\"u\":\"%s\",\"uf\":\"%s\",\"t\":%.0f,\"ru\":%lu,\"rt\":%lu,\"c\":%lu,\"p\":%.2f,\"ota\":%d,\"sl\":%lu,\"st\":%lu,\"sc\":%lu,\"ts\":%lu,\"ts_st\":\"%s\",\"ts_cls\":\"%s\",\"ts_ip\":\"%s\",\"ts_conn\":\"%s\",\"ts_cm\":%lu,\"ts_cs\":\"%s\",\"cal\":%d,\"s_rest\":%d,\"s_press\":%d,\"s_dur\":%d}",
     upBuf, flashBuf, cachedTemp, (ramTotal - ramFree), ramTotal, ESP.getCpuFreqMHz(), cachedPower,
     otaEnabled ? 1 : 0, (unsigned long)servoTimestamp, (unsigned long)nowSec, (unsigned long)servoLogCount,
-    (unsigned long)tsStart, tsSt, tsCls, vpnIp.c_str(), connType.c_str(),
+    (unsigned long)tsStart, tsSt, tsCls, vpnIpBuf, connTypeBuf,
     (unsigned long)ts_connect_ms, tsConnectBuf,
     isCalibrated ? 1 : 0, restAngle, pressAngle, pressDurationMs);
   
@@ -1083,33 +1205,35 @@ void handleDebug() {
   char bootDuration[32];
   formatDuration(esp_timer_get_time() / 1000000ULL, bootDuration, sizeof(bootDuration));
 
-  char downtimeDuration[32] = "N/A (first boot)";
+  char downtimeDuration[32] = "No data";
   if (last_off_computed && lastOffDuration > 0) formatDuration(lastOffDuration, downtimeDuration, sizeof(downtimeDuration));
 
-  BootLog latest;
+  BootLog latest = {};
   bool hasLatest = getBootLogAt(0, latest) && (totalBootCount > 0);
-  String lastResetCause = hasLatest ? String(getResetReasonString((esp_reset_reason_t)latest.reasonCode)) : "N/A";
-  String lastResetTime = hasLatest ? formatTimestamp(latest.timestamp) : "N/A";
+  String lastResetCause = hasLatest ? String(getResetReasonString((esp_reset_reason_t)latest.reasonCode)) : "-";
+  String lastResetTime = hasLatest ? formatTimestamp(latest.timestamp) : "-";
 
-  ServoLog latestServo;
-  bool hasServoLatest = getServoLogAt(0, latestServo) && (servoLogCount > 0) && latestServo.timestamp > 0;
+  ServoLog latestServo = {};
+  bool hasServoLatest = getServoLogAt(0, latestServo) && (servoLogCount > 0);
   String lastServoAgo;
-  if (hasServoLatest && time_synced) {
+  if (hasServoLatest && time_synced && latestServo.timestamp > 0) {
     time_t now; time(&now);
     if ((uint32_t)now > latestServo.timestamp) {
       char agoBuf[32];
       formatDuration((uint32_t)now - latestServo.timestamp, agoBuf, sizeof(agoBuf));
       lastServoAgo = String(agoBuf) + " ago";
     } else {
-      lastServoAgo = "just now";
+      lastServoAgo = "Just now";
     }
-  } else if (hasServoLatest) {
+  } else if (hasServoLatest && latestServo.timestamp > 0) {
     lastServoAgo = "Awaiting NTP Sync...";
+  } else if (hasServoLatest) {
+    lastServoAgo = "Recent (Pre-NTP)";
   }
 
-  TailscaleLog latestTs;
+  TailscaleLog latestTs = {};
   bool hasTsLatest = getTailscaleLogAt(0, latestTs) && (tailscaleLogCount > 0);
-  const char* tailscaleStatus = mlRunning ? "CONNECTED" : (mlStandbyMode ? "STANDBY" : "Not Connected");
+  const char* tailscaleStatus = mlRunning ? "Connected" : (mlStandbyMode ? "Standby" : "Not Connected");
 
   int limitLogs = isCurl() ? 6 : MAX_BOOT_LOGS;
 
@@ -1128,13 +1252,21 @@ void handleDebug() {
     int off = snprintf(out.get(), n,
       "==================================================\n"
       " [!] ESP32-S3 LOGS & DEBUG\n"
-      "==================================================\n"
+      "==================================================\n\n"
       " Uptime Since Boot    : %s\n"
-      " Uptime Since Flash   : %s\n"
-      " Last Downtime        : %s\n"
+      " Uptime Since Flash   : %s\n",
+      bootDuration, flashDuration
+    );
+
+    if (last_off_computed && lastOffDuration > 0) {
+      off += snprintf(out.get() + off, n - off,
+        " Last Approx. Downtime: %s\n", downtimeDuration);
+    }
+
+    off += snprintf(out.get() + off, n - off,
       " Boot Time            : %s\n"
-      " Wi-Fi Connect Time   : %s\n",
-      bootDuration, flashDuration, downtimeDuration, bootTimeBuf, wifiConnectBuf
+      " Wi-Fi Connect        : %s\n",
+      bootTimeBuf, wifiConnectBuf
     );
 
     if (vpnConn && tsConnectBuf[0]) {
@@ -1146,33 +1278,38 @@ void handleDebug() {
       " Total Boot Count     : %lu\n"
       " OTA Status           : %s\n",
       totalBootCount,
-      otaEnabled ? "ENABLED" : "disabled"
+      otaEnabled ? "Enabled" : "Disabled"
     );
 
     if (hasServoLatest) {
       off += snprintf(out.get() + off, n - off,
-        "--------------------------------------------------\n"
+        "\n--------------------------------------------------\n\n"
         " [ SERVO ACTIVITY ]\n"
         " Total Triggers       : %lu\n"
-        " Last Tap             : %s (%s)\n",
-        (unsigned long)servoLogCount, lastServoAgo.c_str(), latestServo.fromCurl ? "curl" : "web");
+        " Last Trigger         : %s (%s)\n",
+        (unsigned long)servoLogCount, lastServoAgo.c_str(), latestServo.fromCurl ? "cURL" : "Web");
 
       bool hasServoHistory = false;
-      for (int i = 1; i < limitLogs && i < MAX_SERVO_LOGS; i++) {
+      for (int i = 1; i < limitLogs && i < MAX_SERVO_LOGS && i < (int)servoLogCount; i++) {
         ServoLog sentry;
-        if (!getServoLogAt(i, sentry) || sentry.timestamp == 0) continue;
+        if (!getServoLogAt(i, sentry)) continue;
         if (!hasServoHistory) {
-          off += snprintf(out.get() + off, n - off, " [ PREVIOUS SERVO HISTORY ]\n");
+          off += snprintf(out.get() + off, n - off, "\n [ PREVIOUS SERVO HISTORY ]\n");
           hasServoHistory = true;
         }
+        char timeBuf[40];
+        if (sentry.timestamp > 0) {
+          snprintf(timeBuf, sizeof(timeBuf), "%s", formatTimestamp(sentry.timestamp).c_str());
+        } else {
+          snprintf(timeBuf, sizeof(timeBuf), "Pre-NTP Sync");
+        }
         off += snprintf(out.get() + off, n - off, " [%s] via %s\n",
-          formatTimestamp(sentry.timestamp).c_str(), sentry.fromCurl ? "curl" : "web");
+          timeBuf, sentry.fromCurl ? "cURL" : "Web");
       }
     }
 
-
     off += snprintf(out.get() + off, n - off,
-      "--------------------------------------------------\n"
+      "\n--------------------------------------------------\n\n"
       " [ TAILSCALE ACTIVITY ]\n"
       " Status          : %s\n"
       " Total Sessions  : %lu\n",
@@ -1189,10 +1326,18 @@ void handleDebug() {
       }
       formatDuration(tsDur, tsDurBuf, sizeof(tsDurBuf));
 
+      uint32_t latestDtSec = latestTs.downtimeSec;
+      if (latestDtSec == 0 && latestTs.startTime > 0) {
+        TailscaleLog prevTs = {};
+        if (getTailscaleLogAt(1, prevTs) && prevTs.endTime > 0 && latestTs.startTime > prevTs.endTime) {
+          latestDtSec = latestTs.startTime - prevTs.endTime;
+        }
+      }
+
       char tsDtBuf[64] = "";
-      if (latestTs.downtimeSec > 0) {
-        char b[32]; formatDuration(latestTs.downtimeSec, b, sizeof(b));
-        snprintf(tsDtBuf, sizeof(tsDtBuf), " (downtime: %s)", b);
+      if (latestDtSec > 0) {
+        char b[32]; formatDuration(latestDtSec, b, sizeof(b));
+        snprintf(tsDtBuf, sizeof(tsDtBuf), " (Downtime: %s)", b);
       }
 
       if (latestTs.endTime == 0) {
@@ -1207,10 +1352,10 @@ void handleDebug() {
 
       bool hasTsHistory = false;
       for (int i = 1; i < limitLogs && i < (int)tailscaleLogCount && i < MAX_TAILSCALE_LOGS; i++) {
-        TailscaleLog tentry;
+        TailscaleLog tentry = {};
         if (!getTailscaleLogAt(i, tentry) || tentry.startTime == 0) continue;
         if (!hasTsHistory) {
-          off += snprintf(out.get() + off, n - off, " [ PREVIOUS TAILSCALE HISTORY ]\n");
+          off += snprintf(out.get() + off, n - off, "\n [ PREVIOUS TAILSCALE HISTORY ]\n");
           hasTsHistory = true;
         }
         char itemDur[32];
@@ -1221,281 +1366,331 @@ void handleDebug() {
           uint32_t d = (tentry.endTime > tentry.startTime) ? (tentry.endTime - tentry.startTime) : 0;
           formatDuration(d, itemDur, sizeof(itemDur));
         }
+        uint32_t dtSec = tentry.downtimeSec;
+        if (dtSec == 0 && tentry.startTime > 0) {
+          TailscaleLog prevTs = {};
+          if (getTailscaleLogAt(i + 1, prevTs) && prevTs.endTime > 0 && tentry.startTime > prevTs.endTime) {
+            dtSec = tentry.startTime - prevTs.endTime;
+          }
+        }
         char itemDt[48] = "";
-        if (tentry.downtimeSec > 0) {
-          char b[32]; formatDuration(tentry.downtimeSec, b, sizeof(b));
-          snprintf(itemDt, sizeof(itemDt), " (downtime: %s)", b);
+        if (dtSec > 0) {
+          char b[32]; formatDuration(dtSec, b, sizeof(b));
+          snprintf(itemDt, sizeof(itemDt), " (Downtime: %s)", b);
         }
 
         off += snprintf(out.get() + off, n - off,
-          " [%s]  Duration: %-6s%s\n",
+          " [%s]\n"
+          "   Duration: %s%s\n\n",
           formatTimestamp(tentry.startTime).c_str(),
           itemDur,
           itemDt);
       }
     }
 
-    off += snprintf(out.get() + off, n - off,
-      "--------------------------------------------------\n"
-      " [ RESET FORENSICS ]\n"
-      " Last Reset Cause     : %s\n"
-      " Last Reset Time      : %s\n",
-      lastResetCause.c_str(),
-      lastResetTime.c_str()
-    );
+    if (totalBootCount > 0 && hasLatest) {
+      off += snprintf(out.get() + off, n - off,
+        "\n--------------------------------------------------\n\n"
+        " [ RESET FORENSICS ]\n"
+        " Last Reset Cause     : %s\n"
+        " Last Reset Time      : %s\n",
+        lastResetCause.c_str(),
+        lastResetTime.c_str()
+      );
 
-    bool hasBootHistory = false;
-    for (int i = 1; i < limitLogs; i++) {
-      BootLog entry;
-      if (!getBootLogAt(i, entry) || entry.timestamp == 0) continue;
-      if (!hasBootHistory) {
-        off += snprintf(out.get() + off, n - off, "\n [ PREVIOUS BOOT HISTORY ]\n");
-        hasBootHistory = true;
+      bool hasBootHistory = false;
+      for (int i = 1; i < limitLogs; i++) {
+        BootLog entry = {};
+        if (!getBootLogAt(i, entry) || entry.timestamp == 0) continue;
+        if (!hasBootHistory) {
+          off += snprintf(out.get() + off, n - off, "\n [ PREVIOUS BOOT HISTORY ]\n");
+          hasBootHistory = true;
+        }
+        char dtStr[48] = "";
+        if (entry.downtimeSec > 0) {
+          char dtBuf[32]; formatDuration(entry.downtimeSec, dtBuf, sizeof(dtBuf));
+          snprintf(dtStr, sizeof(dtStr), " (Downtime: %s)", dtBuf);
+        }
+        off += snprintf(out.get() + off, n - off,
+          " [%s]\n"
+          "   %s%s\n\n",
+          formatTimestamp(entry.timestamp).c_str(),
+          getResetReasonString((esp_reset_reason_t)entry.reasonCode),
+          dtStr);
       }
-      char dtBuf[32];
-      formatDuration(entry.downtimeSec, dtBuf, sizeof(dtBuf));
-      char dtStr[48] = "";
-      if (entry.downtimeSec > 0) snprintf(dtStr, sizeof(dtStr), " (down: %s)", dtBuf);
-      off += snprintf(out.get() + off, n - off, " [%s]  %-24s%s\n",
-        formatTimestamp(entry.timestamp).c_str(),
-        getResetReasonString((esp_reset_reason_t)entry.reasonCode),
-        dtStr);
     }
     off += snprintf(out.get() + off, n - off, "==================================================\n");
     server.sendHeader("Connection", "close");
     server.send(200, "text/plain; charset=utf-8", out.get());
   } else {
-    // Build servo trigger history HTML (start at 1, latest shown separately in summary card)
-    String servoHtml;
-    servoHtml.reserve(1500);
-    for (int i = 1; i < MAX_SERVO_LOGS; i++) {
-      ServoLog sentry;
-      if (!getServoLogAt(i, sentry) || sentry.timestamp == 0) continue;
-      char sline[320];
-      snprintf(sline, sizeof(sline),
-        "<div class='log-item'>"
-        "<div class='log-meta'>"
-        "<span class='log-title'>Servo Actuation</span>"
-        "<span class='log-sub'>%s</span>"
-        "</div>"
-        "<span class='log-badge'>%s</span>"
-        "</div>",
-        formatTimestamp(sentry.timestamp).c_str(),
-        sentry.fromCurl ? "CURL" : "WEB");
-      servoHtml += sline;
-    }
-
-    // Build Tailscale connection history HTML
-    String tsHtml;
-    tsHtml.reserve(2500);
-    time_t nowTs; time(&nowTs);
-    for (int i = 0; i < MAX_TAILSCALE_LOGS && i < (int)tailscaleLogCount; i++) {
-      TailscaleLog tentry;
-      if (!getTailscaleLogAt(i, tentry) || tentry.startTime == 0) continue;
-
-      char durBuf[32];
-      if (tentry.endTime == 0) {
-        uint32_t d = (nowTs > tentry.startTime) ? (uint32_t)(nowTs - tentry.startTime) : 0;
-        formatDuration(d, durBuf, sizeof(durBuf));
-      } else {
-        uint32_t d = (tentry.endTime > tentry.startTime) ? (tentry.endTime - tentry.startTime) : 0;
-        formatDuration(d, durBuf, sizeof(durBuf));
-      }
-
-      char dtHtml[64] = "";
-      if (tentry.downtimeSec > 0) {
-        char dtBuf[32]; formatDuration(tentry.downtimeSec, dtBuf, sizeof(dtBuf));
-        snprintf(dtHtml, sizeof(dtHtml), " &bull; Downtime: %s", dtBuf);
-      }
-
-      const char* badgeClass = "";
-      const char* badgeText = "ENDED";
-      if (tentry.endTime == 0) {
-        badgeClass = "on";
-        badgeText = "ACTIVE";
-      } else if (i == 0) {
-        badgeClass = "latest";
-        badgeText = "LATEST";
-      }
-
-      String rangeStr = formatSessionRange(tentry.startTime, tentry.endTime);
-
-      char line[512];
-      if (tentry.endTime == 0) {
-        snprintf(line, sizeof(line),
-          "<div class='log-item%s'>"
-          "<div class='log-meta'>"
-          "<span class='log-title'>Active Session</span>"
-          "<span class='log-sub'>%s</span>"
-          "<span class='log-sub'>Duration: <span id='ts-dur-val'>%s</span>%s</span>"
-          "</div>"
-          "<span class='log-badge %s'>%s</span>"
-          "</div>",
-          (i == 0) ? " latest-entry" : "",
-          rangeStr.c_str(),
-          durBuf,
-          dtHtml,
-          badgeClass,
-          badgeText);
-      } else {
-        snprintf(line, sizeof(line),
-          "<div class='log-item%s'>"
-          "<div class='log-meta'>"
-          "<span class='log-title'>Tailscale Session</span>"
-          "<span class='log-sub'>%s</span>"
-          "<span class='log-sub'>Duration: <b>%s</b>%s</span>"
-          "</div>"
-          "<span class='log-badge %s'>%s</span>"
-          "</div>",
-          (i == 0) ? " latest-entry" : "",
-          rangeStr.c_str(),
-          durBuf,
-          dtHtml,
-          badgeClass,
-          badgeText);
-      }
-      tsHtml += line;
-    }
-
-    // Build boot history HTML
-    String historyHtml;
-    historyHtml.reserve(2500);
-    for (int i = 1; i < limitLogs; i++) {
-      BootLog entry;
-      if (!getBootLogAt(i, entry) || entry.timestamp == 0) continue;
-      char dtHtml[64] = "";
-      if (entry.downtimeSec > 0) {
-        char dtBuf[32]; formatDuration(entry.downtimeSec, dtBuf, sizeof(dtBuf));
-        snprintf(dtHtml, sizeof(dtHtml), " &bull; Approx. downtime: %s", dtBuf);
-      }
-      char line[320];
-      const char* cls = getResetReasonClass((esp_reset_reason_t)entry.reasonCode);
-      snprintf(line, sizeof(line),
-        "<div class='log-item'>"
-        "<div class='log-meta'>"
-        "<span class='log-title %s'>%s</span>"
-        "<span class='log-sub'>%s%s</span>"
-        "</div>"
-        "</div>",
-        cls,
-        getResetReasonString((esp_reset_reason_t)entry.reasonCode),
-        formatTimestamp(entry.timestamp).c_str(),
-        dtHtml);
-      historyHtml += line;
-    }
-
-    const size_t n = 5120 + historyHtml.length() + servoHtml.length() + tsHtml.length();
-    std::unique_ptr<char[]> body(new char[n]);
-    int off = snprintf(body.get(), n,
-      "<h1>&#128295; Logs &amp; Debug</h1>"
-      "<h3>General</h3>"
-      "<div class='card'>"
-      "<div class='row'><span class='k'>Uptime since boot</span><span class='v mono' id='up'>%s</span></div>"
-      "<div class='row'><span class='k'>Uptime since flash</span><span class='v mono' id='upf'>%s</span></div>"
-      "<div class='row'><span class='k'>Last approx downtime</span><span class='v mono'>%s</span></div>"
-      "</div>"
-      "<h3>Boot Stats</h3>"
-      "<div class='card'>"
-      "<div class='row'><span class='k'>Boot time</span><span class='v mono'>%s</span></div>"
-      "<div class='row'><span class='k'>Wi-Fi connect</span><span class='v mono'>%s</span></div>"
-      "<div class='row' id='ts-connect-row'%s><span class='k'>Tailscale connect</span><span class='v mono' id='ts-conn-time'>%s</span></div>"
-      "<div class='row'><span class='k'>Total boots</span><span class='v mono'>%lu</span></div>"
-      "<div class='row'><span class='k'>Last reset</span><span class='v mono'>%s</span></div>"
-      "<div class='row'><span class='k'>Last reset time</span><span class='v mono'>%s</span></div>"
-      "</div>",
-      bootDuration, flashDuration, downtimeDuration,
-      bootTimeBuf, wifiConnectBuf,
-      (vpnConn && tsConnectBuf[0]) ? "" : " style='display:none;'",
-      (vpnConn && tsConnectBuf[0]) ? tsConnectBuf : "--",
-      totalBootCount,
-      lastResetCause.c_str(), lastResetTime.c_str()
-    );
-
-    // Servo summary card (placed right after Boot Stats)
-    if (hasServoLatest) {
-      off += snprintf(body.get() + off, n - off,
-        "<h3>Servo</h3>"
+    sendWrappedPageStream(server, "Logs & Debug", "&#128295;", [&]() {
+      char b[768];
+      int offGeneral = snprintf(b, sizeof(b),
+        "<h1>&#128295; Logs &amp; Debug</h1>"
+        "<h3>General</h3>"
         "<div class='card'>"
-        "<div class='row'><span class='k'>Last tap</span><span class='v mono' id='servo-ago'>%s</span></div>"
-        "<div class='row'><span class='k'>Source</span><span class='v mono'>%s</span></div>"
-        "<div class='row'><span class='k'>Total triggers</span><span class='v mono'>%lu</span></div>"
-        "</div>",
-        lastServoAgo.c_str(), latestServo.fromCurl ? "curl" : "web", servoLogCount);
-    }
+        "<div class='row'><span class='k'>Uptime Since Boot</span><span class='v mono' id='up'>%s</span></div>"
+        "<div class='row'><span class='k'>Uptime Since Flash</span><span class='v mono' id='upf'>%s</span></div>",
+        bootDuration, flashDuration
+      );
+      if (last_off_computed && lastOffDuration > 0) {
+        offGeneral += snprintf(b + offGeneral, sizeof(b) - offGeneral,
+          "<div class='row'><span class='k'>Last Approx. Downtime</span><span class='v mono'>%s</span></div>",
+          downtimeDuration
+        );
+      }
+      snprintf(b + offGeneral, sizeof(b) - offGeneral, "</div>");
+      server.sendContent(b);
 
-    // Servo Trigger History (placed ON TOP OF reset logs!)
-    if (servoHtml.length() > 0) {
-      off += snprintf(body.get() + off, n - off,
-        "<h3>Servo Trigger History</h3><div class='card'>%s</div>", servoHtml.c_str());
-    }
+      int offBoot = snprintf(b, sizeof(b),
+        "<h3>Boot Stats</h3>"
+        "<div class='card'>"
+        "<div class='row'><span class='k'>Boot Time</span><span class='v mono'>%s</span></div>"
+        "<div class='row'><span class='k'>Wi-Fi Connect</span><span class='v mono'>%s</span></div>"
+        "<div class='row' id='ts-connect-row'%s><span class='k'>Tailscale Connect</span><span class='v mono' id='ts-conn-time'>%s</span></div>"
+        "<div class='row'><span class='k'>Total Boots</span><span class='v mono'>%lu</span></div>",
+        bootTimeBuf, wifiConnectBuf,
+        (vpnConn && tsConnectBuf[0]) ? "" : " style='display:none;'",
+        (vpnConn && tsConnectBuf[0]) ? tsConnectBuf : "--",
+        totalBootCount
+      );
+      if (totalBootCount > 0 && hasLatest) {
+        offBoot += snprintf(b + offBoot, sizeof(b) - offBoot,
+          "<div class='row'><span class='k'>Last Reset Cause</span><span class='v mono'>%s</span></div>"
+          "<div class='row'><span class='k'>Last Reset Time</span><span class='v mono'>%s</span></div>",
+          lastResetCause.c_str(), lastResetTime.c_str()
+        );
+      }
+      snprintf(b + offBoot, sizeof(b) - offBoot, "</div>");
+      server.sendContent(b);
 
-    // Tailscale Connection History
-    if (tsHtml.length() > 0) {
-      off += snprintf(body.get() + off, n - off,
-        "<h3>Tailscale Connection History</h3><div class='card'>%s</div>", tsHtml.c_str());
-    } else {
-      off += snprintf(body.get() + off, n - off,
-        "<h3>Tailscale Connection History</h3><div class='card'><div class='row'><span class='k'>Status</span><span class='v mono'>Subnet Active</span></div></div>");
-    }
+      if (hasServoLatest) {
+        snprintf(b, sizeof(b),
+          "<h3>Servo</h3>"
+          "<div class='card'>"
+          "<div class='row'><span class='k'>Last Trigger</span><span class='v mono' id='servo-ago'>%s</span></div>"
+          "<div class='row'><span class='k'>Trigger Source</span><span class='v mono'>%s</span></div>"
+          "<div class='row'><span class='k'>Total Triggers</span><span class='v mono'>%lu</span></div>"
+          "</div>",
+          lastServoAgo.c_str(), latestServo.fromCurl ? "cURL" : "Web", servoLogCount);
+        server.sendContent(b);
+      }
 
-    // Reset / Previous Boot History
-    if (historyHtml.length() > 0) {
-      off += snprintf(body.get() + off, n - off,
-        "<h3>Previous Boot History</h3><div class='card'>%s</div>", historyHtml.c_str());
-    }
+      if (servoLogCount > 1) {
+        server.sendContent("<h3>Servo Trigger History</h3><div class='card'>");
+        for (int i = 1; i < MAX_SERVO_LOGS && i < (int)servoLogCount; i++) {
+          ServoLog sentry = {};
+          if (!getServoLogAt(i, sentry)) continue;
+          char timeBuf[40];
+          if (sentry.timestamp > 0) {
+            snprintf(timeBuf, sizeof(timeBuf), "%s", formatTimestamp(sentry.timestamp).c_str());
+          } else {
+            snprintf(timeBuf, sizeof(timeBuf), "Pre-NTP Sync");
+          }
+          char sline[320];
+          snprintf(sline, sizeof(sline),
+            "<div class='log-item'>"
+            "<div class='log-meta'>"
+            "<span class='log-title'>Servo Actuation</span>"
+            "<span class='log-sub'>%s</span>"
+            "</div>"
+            "<span class='log-badge'>%s</span>"
+            "</div>",
+            timeBuf,
+            sentry.fromCurl ? "CURL" : "WEB");
+          server.sendContent(sline);
+        }
+        server.sendContent("</div>");
+      }
 
-    // OTA Updates (placed at the very bottom, right before divider and reboot/clear logs buttons)
-    off += snprintf(body.get() + off, n - off,
-      "<h3>OTA Updates</h3>"
-      "<div class='card'>"
-      "<div class='row'><span class='k'>Status</span>"
-      "<span class='v'><span class='pill %s'>%s</span></span></div></div>",
-      otaEnabled ? "on" : "off", otaEnabled ? "Enabled" : "Disabled"
-    );
+      server.sendContent("<h3>Tailscale Connection History</h3><div class='card'>");
+      time_t nowTs; time(&nowTs);
+      bool anyTs = false;
+      for (int i = 0; i < MAX_TAILSCALE_LOGS && i < (int)tailscaleLogCount; i++) {
+        TailscaleLog tentry = {};
+        if (!getTailscaleLogAt(i, tentry) || tentry.startTime == 0) continue;
+        anyTs = true;
 
-    if (otaEnabled) {
-      off += snprintf(body.get() + off, n - off,
+        char durBuf[32];
+        if (tentry.endTime == 0) {
+          uint32_t d = (nowTs > tentry.startTime) ? (uint32_t)(nowTs - tentry.startTime) : 0;
+          formatDuration(d, durBuf, sizeof(durBuf));
+        } else {
+          uint32_t d = (tentry.endTime > tentry.startTime) ? (tentry.endTime - tentry.startTime) : 0;
+          formatDuration(d, durBuf, sizeof(durBuf));
+        }
+
+        uint32_t dtSec = tentry.downtimeSec;
+        if (dtSec == 0 && tentry.startTime > 0) {
+          TailscaleLog prevTs = {};
+          if (getTailscaleLogAt(i + 1, prevTs) && prevTs.endTime > 0 && tentry.startTime > prevTs.endTime) {
+            dtSec = tentry.startTime - prevTs.endTime;
+          }
+        }
+
+        char dtHtml[64] = "";
+        if (dtSec > 0) {
+          char dtBuf[32]; formatDuration(dtSec, dtBuf, sizeof(dtBuf));
+          snprintf(dtHtml, sizeof(dtHtml), " &bull; Downtime: %s", dtBuf);
+        }
+
+        const char* badgeClass = "";
+        const char* badgeText = "ENDED";
+        if (tentry.endTime == 0) {
+          badgeClass = "on";
+          badgeText = "ACTIVE";
+        } else if (i == 0) {
+          badgeClass = "latest";
+          badgeText = "LATEST";
+        }
+
+        String startStr = formatTimestamp(tentry.startTime);
+        String endStr = (tentry.endTime == 0) ? "" : formatTimestamp(tentry.endTime);
+
+        char line[640];
+        if (tentry.endTime == 0) {
+          snprintf(line, sizeof(line),
+            "<div class='log-item%s'>"
+            "<div class='log-meta'>"
+            "<span class='log-title'>Active Session</span>"
+            "<span class='log-sub'>Started: %s</span>"
+            "<span class='log-sub'>Duration: <span id='ts-dur-val'>%s</span>%s</span>"
+            "</div>"
+            "<span class='log-badge %s'>%s</span>"
+            "</div>",
+            (i == 0) ? " latest-entry" : "",
+            startStr.c_str(),
+            durBuf,
+            dtHtml,
+            badgeClass,
+            badgeText);
+        } else {
+          snprintf(line, sizeof(line),
+            "<div class='log-item%s'>"
+            "<div class='log-meta'>"
+            "<span class='log-title'>Tailscale Session</span>"
+            "<span class='log-sub'>Started: %s</span>"
+            "<span class='log-sub'>Ended: %s</span>"
+            "<span class='log-sub'>Duration: <b>%s</b>%s</span>"
+            "</div>"
+            "<span class='log-badge %s'>%s</span>"
+            "</div>",
+            (i == 0) ? " latest-entry" : "",
+            startStr.c_str(),
+            endStr.c_str(),
+            durBuf,
+            dtHtml,
+            badgeClass,
+            badgeText);
+        }
+        server.sendContent(line);
+      }
+      if (!anyTs) {
+        server.sendContent("<div class='row'><span class='k'>Status</span><span class='v mono'>Subnet Active</span></div>");
+      }
+      server.sendContent("</div>");
+
+      bool hasBootHist = false;
+      for (int i = 1; i < limitLogs; i++) {
+        BootLog entry = {};
+        if (!getBootLogAt(i, entry) || entry.timestamp == 0) continue;
+        if (!hasBootHist) {
+          server.sendContent("<h3>Previous Boot History</h3><div class='card'>");
+          hasBootHist = true;
+        }
+        char dtHtml[64] = "";
+        if (entry.downtimeSec > 0) {
+          char dtBuf[32]; formatDuration(entry.downtimeSec, dtBuf, sizeof(dtBuf));
+          snprintf(dtHtml, sizeof(dtHtml), " &bull; Approx. Downtime: %s", dtBuf);
+        }
+        char line[320];
+        const char* cls = getResetReasonClass((esp_reset_reason_t)entry.reasonCode);
+        snprintf(line, sizeof(line),
+          "<div class='log-item'>"
+          "<div class='log-meta'>"
+          "<span class='log-title %s'>%s</span>"
+          "<span class='log-sub'>%s%s</span>"
+          "</div>"
+          "</div>",
+          cls,
+          getResetReasonString((esp_reset_reason_t)entry.reasonCode),
+          formatTimestamp(entry.timestamp).c_str(),
+          dtHtml);
+        server.sendContent(line);
+      }
+      if (hasBootHist) {
+        server.sendContent("</div>");
+      }
+
+      snprintf(b, sizeof(b),
+        "<h3>OTA Updates</h3>"
+        "<div class='card'>"
+        "<div class='row'><span class='k'>Status</span>"
+        "<span class='v'><span class='pill %s'>%s</span></span></div></div>",
+        otaEnabled ? "on" : "off", otaEnabled ? "Enabled" : "Disabled"
+      );
+      server.sendContent(b);
+
+      if (otaEnabled) {
+        server.sendContent("<div class='actions'><form action='/ota/disable' method='POST'><button type='submit'>Disable OTA</button></form></div>");
+      } else {
+        if (strlen(OTA_KEY) > 0) {
+          server.sendContent(
+            "<div class='actions'>"
+            "<form action='/ota/enable' method='POST' style='display:flex;gap:10px;align-items:center;'>"
+            "<input type='password' name='key' placeholder='OTA Key' required style='flex:1;min-width:0;'>"
+            "<button class='warn' type='submit' style='flex:1;'>Enable OTA</button></form>"
+            "</div>");
+        } else {
+          server.sendContent(
+            "<div class='actions'>"
+            "<form action='/ota/enable' method='POST'>"
+            "<button class='warn' type='submit'>Enable OTA</button></form>"
+            "</div>");
+        }
+      }
+
+      server.sendContent("<hr class='divider'>");
+
+      if (isCalibrated) {
+        server.sendContent(
+          "<div class='actions' style='margin-bottom:12px;'>"
+          "<a href='/calibrate' style='width:100%;text-decoration:none;'><button type='button'>&#127919; Recalibrate Servo</button></a>"
+          "</div>");
+      }
+
+      server.sendContent(
         "<div class='actions'>"
-        "<form action='/ota/disable' method='POST'><button type='submit'>Disable OTA</button></form>"
-        "</div>");
-    } else {
-      off += snprintf(body.get() + off, n - off,
-        "<div class='actions'>"
-        "<form action='/ota/enable' method='POST'><input type='hidden' name='key' value='%s'>"
-        "<button class='warn' type='submit'>Enable OTA</button></form>"
-        "</div>", OTA_KEY);
-    }
-
-    // Divider between OTA/logs and destructive actions
-    off += snprintf(body.get() + off, n - off, "<hr class='divider'>");
-
-    if (isCalibrated) {
-      off += snprintf(body.get() + off, n - off,
-        "<div class='actions' style='margin-bottom:12px;'>"
-        "<a href='/calibrate' style='width:100%%;text-decoration:none;'><button type='button'>&#127919; Recalibrate Servo</button></a>"
-        "</div>");
-    }
-
-    snprintf(body.get() + off, n - off,
-      "<div class='actions'>"
-      "<form action='/reboot' method='POST' onsubmit='return confirm(\"Reboot the ESP32 now?\");'>"
-      "<button class='danger' type='submit'>&#128260; Reboot</button></form>"
-      "<form action='/clear-logs' method='POST' onsubmit='return confirm(\"Clear all logs and flash timers?\");'>"
-      "<button class='warn' type='submit'>&#128465; Clear Logs</button></form>"
-      "</div>"
-      "<a class='back' href='/main'>&larr; Back to dashboard</a>"
-    );
-
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/html; charset=utf-8", wrapPage("Logs & Debug", "&#128295;", body.get(), POLL_SCRIPT));
+        "<form action='/reboot' method='POST' onsubmit='return confirm(\"Reboot the ESP32 now?\");'>"
+        "<button class='danger' type='submit'>&#128260; Reboot</button></form>"
+        "<form action='/clear-logs' method='POST' onsubmit='return confirm(\"Clear all logs and flash timers?\");'>"
+        "<button class='warn' type='submit'>&#128465; Clear Logs</button></form>"
+        "</div>"
+        "<a class='back' href='/main'>&larr; Back to Dashboard</a>"
+      );
+    }, POLL_SCRIPT);
   }
 }
 
 void handleOtaEnable() {
-  if (!server.hasArg("key") || server.arg("key") != OTA_KEY) {
-    server.sendHeader("Connection", "close");
-    server.send(403, "text/plain; charset=utf-8", "Forbidden: bad or missing key.\n");
-    return;
+  if (strlen(OTA_KEY) > 0) {
+    if (!server.hasArg("key") || server.arg("key") != OTA_KEY) {
+      server.sendHeader("Connection", "close");
+      if (isCurl()) {
+        server.send(403, "text/plain; charset=utf-8", "Forbidden: bad or missing key.\n");
+      } else {
+        const char* body =
+          "<div class='card' style='text-align:center;padding:36px 20px;'>"
+          "<div style='font-size:44px;margin-bottom:14px;line-height:1;'>&#9888;</div>"
+          "<h1 style='margin-bottom:16px;font-size:22px;'>Invalid OTA Key</h1>"
+          "<p style='color:var(--on-surface-v);font-size:13.5px;line-height:1.6;'>The key entered was incorrect.<br>Redirecting to debug&hellip;</p>"
+          "</div>";
+        String page = wrapPage("Invalid Key", "&#9888;", body,
+          "<script>setTimeout(function(){window.location.href='/debug';},2500);</script>", true);
+        server.send(403, "text/html; charset=utf-8", page);
+      }
+      return;
+    }
   }
   startOTA();
   server.sendHeader("Connection", "close");
@@ -1638,22 +1833,41 @@ void checkSubnetAndFailoverIfNeeded() {
 }
 
 void setup() {
+  // Run CPU at 80 MHz to save power and keep the chip cool (~38-41°C)
   setCpuFrequencyMhz(80);
+
+#if CONFIG_PM_ENABLE
+  esp_pm_config_esp32s3_t pm_config = {
+    .max_freq_mhz = 80,
+    .min_freq_mhz = 80,
+    .light_sleep_enable = false
+  };
+  esp_pm_configure(&pm_config);
+#endif
+
+  // Load saved angles from flash and move arm to resting position
   loadCalibration();
   initServo();
   myservo.attach(servoPin, 500, 2400);
   myservo.write(restAngle); delay(300); myservo.detach();
 
+  // Load past logs from flash and record this new boot event
   loadBootHistory();
   loadServoHistory();
   loadTailscaleHistory();
   recordBootEvent();
 
+  // Connect to the home Wi-Fi network using saved credentials
   uint32_t wifi_start = millis();
   WiFi.mode(WIFI_STA);
+  wifi_config_t sta_conf;
+  if (esp_wifi_get_config(WIFI_IF_STA, &sta_conf) == ESP_OK) {
+    sta_conf.sta.listen_interval = 1;
+    esp_wifi_set_config(WIFI_IF_STA, &sta_conf);
+  }
   WiFi.setAutoReconnect(true);
-  WiFi.setSleep(false); // Modem sleep disabled so incoming HTTP/curl connections respond immediately
-  WiFi.setTxPower(WIFI_POWER_15dBm);
+  WiFi.setSleep(true);
+  WiFi.setTxPower(WIFI_POWER_13dBm);
   WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS);
   ip_addr_t router_dns;
   IP_ADDR4(&router_dns, 192, 168, 1, 1);
@@ -1663,6 +1877,13 @@ void setup() {
   while (WiFi.status() != WL_CONNECTED) delay(100);
   wifi_connect_ms = millis() - wifi_start;
 
+  // Re-apply listen_interval = 1 to guarantee station wakes on every beacon (102.4ms)
+  // preventing AP buffer overflow and packet drops during subnet routing
+  if (esp_wifi_get_config(WIFI_IF_STA, &sta_conf) == ESP_OK) {
+    sta_conf.sta.listen_interval = 1;
+    esp_wifi_set_config(WIFI_IF_STA, &sta_conf);
+  }
+
   // Give 802.11 association, block ack, and router forwarding time to settle
   delay(1500);
 
@@ -1670,13 +1891,13 @@ void setup() {
   memset(&ml_conf, 0, sizeof(ml_conf));
   ml_conf.auth_key = TAILSCALE_KEY;
   ml_conf.device_name = TAILSCALE_HOST;
-  // Route is advertised by primary subnet router (moto-g32 -> 192.168.1.0/24); keep nullptr to prevent /32 hijacking
-  ml_conf.advertise_routes = nullptr;
+  // Advertise exact same /24 route as moto-g32 for official Tailscale HA subnet failover
+  ml_conf.advertise_routes = "192.168.1.0/24";
   ml_conf.enable_derp = true;
   ml_conf.enable_stun = true;
   ml_conf.enable_disco = true;
   ml_conf.max_peers = 8;
-  ml_conf.wifi_tx_power_dbm = 15;
+  ml_conf.wifi_tx_power_dbm = 13;
 
   ml = microlink_init(&ml_conf); // initialized, ready for start
 
@@ -1712,7 +1933,7 @@ void setup() {
   startTailscale("direct startup");
 #endif
 
-  configTime(19800, 0, "pool.ntp.org", "time.google.com", "time.nist.gov");
+  configTime(19800, 0, "216.239.35.0", "pool.ntp.org", "time.google.com");
 
   if (MDNS.begin("esp32")) {
     MDNS.addService("http", "tcp", 80);
@@ -1727,8 +1948,8 @@ void setup() {
   // It only starts when /ota/enable is hit (see handleOtaEnable / startOTA),
   // and auto-disables after OTA_AUTO_TIMEOUT_MS - see loop().
 
-  const char* headerkeys[] = {"User-Agent", "Host"};
-  server.collectHeaders(headerkeys, 2);
+  const char* headerkeys[] = {"User-Agent", "Host", "Accept-Encoding"};
+  server.collectHeaders(headerkeys, 3);
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/main", HTTP_GET, handleMain);
@@ -1749,11 +1970,11 @@ void setup() {
     [](void*) {
       for (;;) {
         server.handleClient();
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(50));
       }
     },
     "http_srv",   /* task name   */
-    8192,         /* stack bytes */
+    6144,         /* stack bytes */
     nullptr,      /* arg         */
     4,            /* priority    */
     nullptr,      /* handle out  */
@@ -1761,25 +1982,27 @@ void setup() {
                      keeping WebServer off Core 1 where wg_mgr lives */
   );
 
+  loopTaskHandle = xTaskGetCurrentTaskHandle();
   boot_time_ms = millis();
 }
 
 void loop() {
+  // Check for wireless updates and close the window automatically after 10 minutes
   if (otaEnabled) {
     ArduinoOTA.handle();
     if (millis() - otaEnabledAt > OTA_AUTO_TIMEOUT_MS) stopOTA();
   }
 
-  // Fire the servo after the HTTP response has already been sent.
-  // This is the async half of the handleRoot() optimisation: the client gets
-  // its 200 immediately, then the servo moves without blocking anything.
+  // Move the servo to press the button in the background
   if (pendingPress) {
     pendingPress = false;
     triggerPress();
   }
 
+  // Sync clock with internet time and save heartbeat to measure outage downtime
   if (!time_synced) syncTimeIfNeeded();
   heartbeatIfNeeded();
+  // Check if primary router is alive, or switch to backup if it went down
   checkSubnetAndFailoverIfNeeded();
 
   if (mlRunning && mlStartedAtMs > 0) {
@@ -1790,5 +2013,6 @@ void loop() {
     }
   }
 
-  vTaskDelay(pdMS_TO_TICKS(20));
+  // Put chip to sleep to save power; wakes up instantly when a button is clicked
+  ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
 }

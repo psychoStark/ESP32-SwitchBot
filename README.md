@@ -1,193 +1,210 @@
 # ESP32-S3 SwitchBot Dashboard with Embedded Tailscale VPN
 
-Transform an **ESP32-S3** into an encrypted, remotely-accessible smart switch actuator. The device drives a mechanical servo motor to physically actuate a power button on command, accessible from anywhere in the world via an embedded **Tailscale VPN** client (`microlink`) as well as local Wi-Fi.
+Transform an **ESP32** into an encrypted smart switch actuator that physically pushes buttons (power switches, lights, appliances, or PC power buttons) on command. Control it locally over your home Wi-Fi or remotely from anywhere in the world via **Tailscale VPN**.
 
-The system features dual user interfaces: a modern browser dashboard and an interactive, real-time terminal command center served directly to `curl`.
-
----
-
-## Key Features
-
-* **Tailscale Cloud Watchdog & Cold Standby/Failover:** Automatically monitors primary subnet router connectivity via Tailscale REST API (`api.tailscale.com`). When the primary subnet router is online, ESP32 Tailscale remains in cold **STANDBY** (~38-41°C at 80 MHz). If the router disconnects for 2 consecutive checks (~90s), ESP32 dynamically activates embedded Tailscale.
-* **Embedded Tailscale VPN (`microlink`):** Full zero-config WireGuard mesh VPN client built directly into the firmware. Connects via DERP relays, STUN NAT traversal, and DISCO direct peer-to-peer discovery. Reachable from anywhere on your Tailnet via MagicDNS (`http://esp32/`) or subnet route (`192.168.1.50`).
-* **Interactive Dual-UI Servo Calibration:** Touch-friendly circular SVG dials in Web UI (`/calibrate`) with bottom gap barrier protection & interactive step-by-step TUI in `curl`. Supports real-time angle adjustments, test tap execution, smooth revert animations, and NVS persistence (`servo_cal`).
-* **Dual-UX Interface:**
-  * **Web Dashboard:** Mobile-first, cyber-dark UI with live telemetry, sensor gauges, and VPN indicators.
-  * **Interactive Terminal CLI:** Detects `curl` requests and streams a live, keystroke-driven Bash TUI menu without needing any client-side software.
-* **Multi-Core FreeRTOS Architecture:**
-  * **Core 0:** Dedicated `http_srv` webserver task (priority 4, 8 KB stack) and non-blocking DERP network I/O.
-  * **Core 1:** High-performance WireGuard cryptographic engine (`wg_mgr`) and main application logic.
-* **Non-Blocking Async Servo Actuation:** Immediate `< 5ms` HTTP 200 response with background queue execution to eliminate TCP timeouts over high-latency remote links.
-* **Power & Heat Optimization:** Boot and operates at 80 MHz CPU frequency by default (`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80`), Wi-Fi modem sleep IRAM optimization (`CONFIG_ESP_WIFI_SLP_IRAM_OPT`), keeping chip operating temperatures low (~38-41°C).
-* **Flash Wear-Leveling Forensics & Activity Ring Buffers:** Ring-buffered NVS storage for boots (`b0`..`b49`), servo triggers (`s0`..`s19`), and Tailscale sessions (`t0`..`t19`), tracking reset causes, boot times, tap history, and downtime forensics.
-* **Gated On-Demand OTA:** Secure Over-The-Air flash updates locked by default. Enabled via authenticated POST for a 10-minute auto-closing window.
+The device features two clean, zero-software interfaces:
+* **Web Dashboard:** Open in any web browser on your phone, tablet, or PC.
+* **Terminal Dashboard:** Open directly in any terminal using a standard `curl` command.
 
 ---
 
-## Hardware Specifications & Wiring
+## Features
 
-* **MCU:** ESP32-S3-WROOM-1 / N16R8 (16 MB Flash, 8 MB Octal PSRAM)
-* **CPU Clock:** 80 MHz default (low power & heat, ~38-41°C operating temp)
-* **Actuator:** Standard 3.3V / 5V Servo (SG90, MG90S, etc.)
-* **Pin Connections:**
-  * **Servo Signal (PWM):** GPIO 1
-  * **Servo VCC:** 5V / 3.3V
-  * **Servo GND:** Ground
+* **Local or Remote Access:** Control your SwitchBot locally over your home Wi-Fi network without any cloud services, or connect securely from anywhere via Tailscale mesh VPN.
+* **Cloud Watchdog & Automatic Standby:** Keeps the ESP32 cool and power-efficient when your main home network router is online, and automatically takes over if your primary router goes offline.
+* **Interactive Servo Calibration:** Easily adjust button pressing angles and durations using live dials in your browser or a guided terminal wizard.
+* **Instant Button Response:** Sends an immediate confirmation when clicked, so you never have to wait for the physical servo movement to complete.
+* **Activity & Reset Logs:** Keeps track of past button presses, boot causes, power outage downtime, and connection history.
+* **OTA for Future Updates:** Wirelessly update the ESP32 with new firmware versions or updated network credentials over Wi-Fi without needing a USB cable.
 
 ---
 
-## Project Structure
+## Hardware Requirements & Wiring
+
+### Hardware Checklist
+* **Microcontroller:**
+  * **Tested Board:** ESP32-S3 (DOIT N16R8 with 16 MB Flash, 8 MB Octal PSRAM).
+  * **Compatible Boards:** ESP32-S3 (all variants), ESP32 (Classic), ESP32-C3, and ESP32-S2.
+  * **Minimum Requirement:** Any ESP32 development board with at least 4 MB Flash (8 MB or 16 MB recommended for dual-slot wireless OTA updates). *(For board-specific feature differences, see `documentation.md`).*
+* **Actuator:** Standard 3.3V–5V micro servo (e.g., TowerPro SG90, MG90S).
+* **Power Supply:** Standard 5V USB-C power supply or phone charger.
+* **USB Cable:** A data-capable USB cable for the initial flash.
+
+### Wiring Diagram
 
 ```
-ESP32-SwitchBot/
-├── CMakeLists.txt            # Root CMake project configuration
-├── partitions.csv            # Custom 16MB partition table (dual 4MB OTA slots)
-├── sdkconfig.defaults        # ESP-IDF configurations (80MHz CPU, Octal PSRAM, ChaCha20-Poly1305)
-├── dependencies.lock         # Managed IDF component locks
-├── documentation.md          # Comprehensive firmware & network documentation
-├── README.md                 # Repository overview and quickstart guide
-├── main/
-│   ├── CMakeLists.txt        # IDF component registration & linker wrappers
-│   ├── main.cpp              # Primary firmware application, HTTP endpoints & watchdog
-│   ├── calibration.h         # Servo calibration storage, web SVG dial UI & cURL script
-│   ├── curl_scripts.h        # Interactive bash TUI dashboard generator for cURL clients
-│   ├── web_pages.h           # Responsive cyber-dark HTML templates, CSS & poll scripts
-│   ├── secrets.h             # Wi-Fi credentials, Tailscale keys & API watchdog (gitignored)
-│   └── calibrateservo/       # Standalone servo angle calibration sketch
-└── components/
-    ├── microlink/            # Embedded Tailscale client (WireGuard, DERP, DISCO)
-    ├── wireguard_lwip/       # Symlink to microlink wireguard_lwip component
-    ├── arduino/              # Arduino-ESP32 v2.x component (gitignored external)
-    └── ESP32Servo/           # ESP32Servo PWM library (gitignored external)
+ESP32-S3 Pin                     Servo Motor (SG90 / MG90S)
+────────────────────────────────────────────────────────────
+GPIO 1 (Signal)    ───────────►   Signal Wire (Orange / Yellow)
+5V / VIN           ───────────►   VCC Wire    (Red)
+GND                ───────────►   GND Wire    (Brown / Black)
 ```
 
 ---
 
-## Getting Started
+## Installation Guide
 
 ### 1. Prerequisites
 
-* [ESP-IDF v5.1.x](https://docs.espressif.com/projects/esp-idf/en/v5.1.4/esp32s3/get-started/) installed.
-* USB-to-UART cable connected to the ESP32-S3.
+Make sure you have the following installed on your computer:
+* **Python 3.6+** (Standard Python; no extra packages needed).
+* **ESP-IDF v5.1.x** (v5.1.4 recommended). Follow the [Official ESP-IDF Installation Guide](https://docs.espressif.com/projects/esp-idf/en/v5.1.4/esp32s3/get-started/).
+* **Git**.
 
-### 2. Clone Dependencies
+### 2. Download the Project & Components
 
-Clone the external vendored components into `components/`:
+Open your terminal and run:
 
 ```bash
-# Clone Arduino-ESP32 component
-git clone -b release/v2.x https://github.com/espressif/arduino-esp32.git components/arduino
+# Clone this repository
+git clone https://github.com/psychoStark/ESP32-SwitchBot.git
+cd ESP32-SwitchBot
 
-# Clone ESP32Servo library
+# Download required Arduino and Servo components
+git clone -b release/v2.x https://github.com/espressif/arduino-esp32.git components/arduino
 git clone https://github.com/madhephaestus/ESP32Servo.git components/ESP32Servo
 ```
 
-### 3. Configure Credentials (`secrets.h`)
+---
 
-Create `main/secrets.h` (this file is excluded from Git):
+### 3. Setup Your Credentials (`setup_secrets.py`)
 
-```cpp
-#pragma once
+This project includes an interactive terminal setup tool, `setup_secrets.py`, to easily configure your Wi-Fi and network credentials in `main/secrets.h`.
 
-// Wi-Fi Credentials
-#define WIFI_SSID       "Your_WiFi_SSID"
-#define WIFI_PASSWORD   "Your_WiFi_Password"
-
-// Tailscale Authentication & Machine Identity
-#define TAILSCALE_KEY   "tskey-auth-kXXXXX-XXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-#define TAILSCALE_HOST  "esp32"
-
-// OTA Security Key
-#define OTA_KEY         "YourSecretOtaPassword"
-
-// Optional: Tailscale API Watchdog for Subnet Failover
-#define TAILSCALE_API_KEY           "tskey-api-kXXXXX-XXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-#define TAILSCALE_SUBNET_DEVICE_ID  "123456789" // Numeric Device ID or machine hostname (e.g., "moto-g32")
-```
-
-### 4. Build and Flash
+Run the setup wizard:
 
 ```bash
-# Activate ESP-IDF environment
-source ~/esp/esp-idf-v5.1.4/export.sh
+# macOS / Linux:
+python3 setup_secrets.py
 
-# Build the project
-idf.py build
-
-# Flash to the board and open serial monitor
-idf.py -p /dev/cu.usbserial-0001 flash monitor
+# Windows:
+python setup_secrets.py
 ```
 
----
-
-## Network & Access Methods
-
-The device can be accessed through multiple paths:
-
-| Access Method | URL | Network Context |
-|---|---|---|
-| **MagicDNS (Tailscale)** | `http://esp32/main` | Any machine connected to your Tailnet (Worldwide) |
-| **Tailscale Subnet Route** | `http://192.168.1.50/main` | Any machine connected to your Tailnet or local Wi-Fi |
-| **Local mDNS** | `http://esp32.local/main` | Devices on the same local Wi-Fi network |
-
-> [!TIP]
-> To access `http://esp32.local/main` while outside your home Wi-Fi over Tailscale, add this entry to `/etc/hosts` on your client machine:
-> ```bash
-> echo "192.168.1.50 esp32.local" | sudo tee -a /etc/hosts
-> ```
+The tool will prompt you for:
+1. **Wi-Fi SSID & Password:** Your home 2.4 GHz Wi-Fi credentials.
+2. **Tailscale Auth Key (Optional):** Pre-authenticated key from your Tailscale Admin Console. *(Leave empty if you only want to use local Wi-Fi).*
+3. **Tailscale Device Name:** Name for your device on your Tailnet (default: `esp32`).
+4. **Tailscale API Token & Primary Subnet Router (Optional):** Used for automated failover monitoring. *(Leave empty if you don't use this).*
+5. **OTA Security Key:** A password or PIN to authorize future wireless updates. *(Leave empty to allow one-click updates without a password).*
 
 ---
 
-## Terminal Command Center (`curl`)
+### 4. Build and Flash the Firmware
 
-Connect to the device using `curl` to launch the interactive live dashboard:
+Connect your ESP32 board to your computer using a USB cable.
+
+#### Linux Setup
+Ensure your user account has permission to access the serial port:
+```bash
+sudo usermod -a -G dialout $USER
+# (Log out and log back in for this to take effect)
+```
+
+#### Compile and Flash
+
+```bash
+# 1. Activate the ESP-IDF environment
+source ~/esp/esp-idf-v5.1.4/export.sh       # On Linux & macOS
+# or on Windows: %userprofile%\esp\esp-idf-v5.1.4\export.bat
+
+# 2. Build the firmware
+idf.py build
+
+# 3. Flash to your board and open the serial monitor:
+# Linux example (replace with your port, e.g. /dev/ttyUSB0 or /dev/ttyACM0):
+idf.py -p /dev/ttyUSB0 flash monitor
+
+# macOS example:
+idf.py -p /dev/cu.usbserial-0001 flash monitor
+
+# Windows example:
+idf.py -p COM3 flash monitor
+```
+
+*(Press `Ctrl + ]` to exit the serial monitor).*
+
+---
+
+## Initial Servo Calibration
+
+On its very first boot, the ESP32 starts in a safe uncalibrated state so the servo arm will not move unexpectedly.
+
+### Option A: Web Browser Calibration
+
+1. Open your browser and go to `http://192.168.1.50/` or `http://esp32.local/`.
+2. **Rest Angle:** Rotate the top dial to set where the arm rests when idle (hovering just above the button). The arm moves live as you adjust the dial.
+3. **Press Angle:** Rotate the second dial to set how far the arm pushes down on the button.
+4. **Press Duration:** Set how many milliseconds the arm holds the button down before releasing.
+5. **Test Button:** Tap the test button to run a test press and confirm proper physical button actuation.
+6. Tap **Save Calibration**. Your settings are saved and the device is ready to use.
+
+### Option B: Terminal Calibration (`curl`)
+
+You can also calibrate directly from your terminal:
+
+```bash
+bash <(curl -s http://192.168.1.50/calibrate)
+```
+
+Follow the on-screen steps to test angles live and save them.
+
+---
+
+## How to Use
+
+### Browser Access
+
+Navigate to any of these addresses in your browser:
+* **Local Network:** `http://192.168.1.50/` or `http://esp32.local/`
+* **Tailscale (Worldwide):** `http://esp32/`
+
+### Terminal Access (`curl`)
+
+Run this command in any terminal:
+
+```bash
+curl -s http://192.168.1.50/main | bash
+```
+
+Or over Tailscale:
 
 ```bash
 curl -s http://esp32/main | bash
 ```
 
-### Add a Shell Alias
-
-Add this alias to your `~/.zshrc` or `~/.bashrc`:
-
-```bash
-alias switchbot="curl -s http://esp32/main | bash"
-```
-
-Once reloaded (`source ~/.zshrc`), type **`switchbot`** in your terminal to open the single-keystroke control menu:
-* `[1]` Trigger Servo / Calibrate Servo
-* `[2]` Device Info & Hardware Telemetry (live updating)
-* `[3]` Crash Logs & Debug (boot history, downtime forensics & Tailscale activity)
-* `[S]` Recalibrate Servo
-* `[C]` Clear Logs & Timers
-* `[O]` Enable / Disable OTA Update Window (10 min)
-* `[R]` Reboot ESP32
-* `[X]` Exit
+#### Terminal Menu Shortcuts:
+* Press **`1`**: Trigger physical button press (or calibrate if not yet calibrated).
+* Press **`2`**: Live device stats (temperature, uptime, memory, Wi-Fi, Tailscale).
+* Press **`3`**: View crash logs, past reboots, downtime, and connection history.
+* Press **`S`**: Recalibrate servo angles.
+* Press **`C`**: Clear saved logs.
+* Press **`O`**: Unlock Over-The-Air update window.
+* Press **`R`**: Reboot the ESP32.
+* Press **`X`**: Exit.
 
 ---
 
-## API Reference
+## Over-The-Air (OTA) Updates
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/` | GET | Triggers the physical servo tap sequence (async queue with 2s cooldown). Redirects to `/calibrate` if uncalibrated. |
-| `/main` | GET | Delivers the Web UI dashboard or the interactive terminal Bash script to `curl`. |
-| `/info` | GET | Returns hardware diagnostics (Uptime, Temperature, RAM, Flash, PSRAM, Clock, Wi-Fi, Tailscale Status). |
-| `/debug` | GET | Displays rolling crash history, last reset cause, downtime forensics, servo log & Tailscale sessions. |
-| `/api/live` | GET | High-frequency JSON telemetry endpoint (`{"u":"...","t":40.5,"c":80,"cal":1...}`). |
-| `/calibrate` | GET | Serves Web SVG dial calibration UI or interactive Bash script to `curl`. |
-| `/api/calibrate/move` | POST | Live moves servo to specified angle (`?angle=X`). |
-| `/api/calibrate/hold` | POST | Holds servo at press angle on button press (`?state=1`) or releases to rest (`?state=0`). |
-| `/api/calibrate/test` | POST | Executes a test tap with given metrics (`?rest=X&press=Y&dur=Z`). |
-| `/api/calibrate/save` | POST | Persists rest angle, press angle, and duration metrics to NVS (`servo_cal`). |
-| `/api/calibrate/reset` | POST | Clears NVS calibration data and resets to uncalibrated initial defaults. |
-| `/ota/enable` | POST | Unlocks the ArduinoOTA port for 10 minutes (`-d "key=YOUR_KEY"`). |
-| `/ota/disable` | POST | Manually closes the ArduinoOTA update port. |
-| `/clear-logs` | POST | Securely wipes NVS crash records, servo history, Tailscale session logs, and flash timers. |
-| `/reboot` | POST | Gracefully restarts the microcontroller. |
+Wirelessly update the ESP32 with new firmware versions or updated Wi-Fi/network credentials without plugging into a computer:
+
+1. Unlock the OTA window from the Web UI (`/debug` page) or Terminal CLI (`[O]`). Enter your OTA key if configured.
+2. The update window opens for **10 minutes**.
+3. Upload new firmware wirelessly:
+   ```bash
+   python3 ~/.platformio/packages/framework-arduinoespressif32/tools/espota.py -i 192.168.1.50 -p 3232 -f build/ESP32-SwitchBot.bin
+   ```
+4. When finished, or after 10 minutes, the OTA port automatically locks itself again.
+
+---
+
+## Detailed Documentation
+
+For detailed technical documentation on how the system works under the hood, see [documentation.md](documentation.md).
 
 ---
 
 ## License
 
-This project is open source and available under the [Apache 2.0 License](LICENSE).
+This project is licensed under the [Apache 2.0 License](LICENSE).

@@ -626,8 +626,8 @@ void ml_derp_tx_task(void *arg) {
             }
         }
 
-        /* Yield briefly */
-        vTaskDelay(pdMS_TO_TICKS(1));
+        /* Yield briefly when idle (10ms prevents 1 kHz busy-spin while maintaining low latency) */
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
     ESP_LOGI(TAG, "DERP I/O task exiting");
