@@ -2,6 +2,9 @@
 main/secrets.h
 **/secrets.h
 *secrets.h
+*.bak
+*secrets.h.bak
+**/secrets.h.bak
 
 # ESP-IDF Build Output
 build/
@@ -21,6 +24,13 @@ sdkconfig.old
 
 # PlatformIO Legacy
 .pio/
+.pioenvs/
+.piolibdeps/
+
+# Python Cache & Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
 
 # Language Server & IDE Configuration
 .clangd/

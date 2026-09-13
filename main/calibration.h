@@ -114,10 +114,56 @@ while true; do
   fi
   echo " Current Config: Rest=${REST}° | Press=${PRESS}° | Duration=${DUR}ms"
   echo '=========================================='
+  if [[ "$CUR_CAL" == "1" ]]; then
+    echo ' [1] Start Guided Calibration (Steps 1-3)'
+    echo ' [T] Test Current Tap'
+    echo ' [R] Reset Calibration Data'
+    echo ' [X] Exit'
+    echo '=========================================='
+    echo ''
+    mopt=""
+    read -n 1 -s -p "Select an option: " mopt </dev/tty
+    echo ''
+    if [[ "$mopt" == "r" || "$mopt" == "R" ]]; then
+      rconf=""
+      read -n 1 -s -p 'Are you sure you want to clear calibration data? [y/N]: ' rconf </dev/tty
+      echo ''
+      if [[ "$rconf" == "y" || "$rconf" == "Y" ]]; then
+        curl -s -X POST "http://$HOST/api/calibrate/reset"
+        echo -e '\n[+] Calibration data cleared. Device reset to uncalibrated.\n'
+        sleep 1.5
+        exit 0
+      fi
+      continue
+    elif [[ "$mopt" == "t" || "$mopt" == "T" ]]; then
+      echo '[*] Running test tap...'
+      curl -s -X POST "http://$HOST/api/calibrate/test?rest=$REST&press=$PRESS&dur=$DUR"
+      echo '[+] Test completed.'
+      sleep 1.5
+      continue
+    elif [[ "$mopt" == "x" || "$mopt" == "X" ]]; then
+      echo 'Exiting.'
+      exit 0
+    elif [[ "$mopt" != "1" && "$mopt" != "c" && "$mopt" != "C" ]]; then
+      continue
+    fi
+  fi
   echo ''
   while true; do
     echo '[ Step 1/3: Rest Angle ] (Hovering just above button)'
-    read -p "Enter rest angle (-180 to 180, 'q' to cancel) [$REST]: " input </dev/tty
+    read -p "Enter rest angle (-180 to 180, 'r' to reset, 'q' to cancel) [$REST]: " input </dev/tty
+    if [[ "$input" == "r" || "$input" == "R" ]]; then
+      rconf=""
+      read -n 1 -s -p 'Are you sure you want to clear calibration data? [y/N]: ' rconf </dev/tty
+      echo ''
+      if [[ "$rconf" == "y" || "$rconf" == "Y" ]]; then
+        curl -s -X POST "http://$HOST/api/calibrate/reset"
+        echo -e '\n[+] Calibration data cleared. Device reset to uncalibrated.\n'
+        sleep 1.5
+        exit 0
+      fi
+      continue
+    fi
     if [[ "$input" == "q" || "$input" == "Q" ]]; then
       echo '[*] Cancelling calibration... returning servo to saved rest position.'
       curl -s -X POST "http://$HOST/api/calibrate/move?angle=$ORIG_REST" >/dev/null
@@ -225,7 +271,7 @@ while true; do
     echo ' [T] Test Again'
     echo ' [V] Type in Another Value'
     echo ' [C] Restart Whole Calibration'
-    echo ' [R] Clear Calibration Data'
+    echo ' [R] Reset Calibration Data'
     echo ' [X] Exit without Saving'
     echo '=========================================='
     opt=""
@@ -304,9 +350,9 @@ done
 }
 
 /**
- * @brief Generate the HTML calibration page for web browsers
+ * @brief Stream the HTML calibration page for web browsers
  */
-inline String generateCalibratePage(int curRest, int curPress, int curDur, bool calibrated) {
+inline void sendCalibratePage(WebServer &server, int curRest, int curPress, int curDur, bool calibrated) {
   String statusBadge = calibrated 
     ? "<span class='pill on'>Calibrated</span>" 
     : "<span class='pill warn'>Initial Setup Needed</span>";
@@ -345,10 +391,9 @@ inline String generateCalibratePage(int curRest, int curPress, int curDur, bool 
           ".cal-dial-input::-webkit-inner-spin-button,.cal-dial-input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}"
           ".dial-deg{font-size:13px;font-weight:700;color:var(--primary);opacity:0.85;margin-left:1px;line-height:1.2;user-select:none;-webkit-user-select:none;}"
           ".dial-limits{position:absolute;bottom:2px;left:0;right:0;display:flex;justify-content:space-between;padding:0 10px;font-size:9.5px;color:var(--on-surface-v);pointer-events:none;font-family:'SF Mono',Menlo,monospace;}"
-          ".cal-row{display:flex;flex-direction:column;align-items:stretch;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,0.06);transition:background .2s ease;margin:0;}"
+          ".cal-row{display:flex;flex-direction:column;align-items:stretch;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,0.06);margin:0;}"
           ".cal-row:first-child{border-top-left-radius:19px;border-top-right-radius:19px;}"
           ".cal-row:last-child{border-bottom:none;border-bottom-left-radius:19px;border-bottom-right-radius:19px;}"
-          ".cal-row:hover{background:rgba(138,180,248,0.05);}"
           ".cal-num-box{display:inline-flex;align-items:center;background:var(--surface-c);border:1px solid var(--surface-border);border-radius:10px;padding:3px 8px;box-shadow:inset 0 1px 3px rgba(0,0,0,0.3);}"
           ".cal-num-box:focus-within{border-color:var(--primary);box-shadow:0 0 10px rgba(138,180,248,0.25);}"
           ".cal-num-raw{background:transparent !important;border:none !important;color:var(--primary);font-family:'SF Mono',Menlo,Consolas,monospace;font-size:14px;font-weight:700;padding:0 !important;margin:0 !important;text-align:right;width:48px;outline:none;-moz-appearance:textfield;appearance:textfield;}"
@@ -374,7 +419,7 @@ inline String generateCalibratePage(int curRest, int curPress, int curDur, bool 
   // Rest Angle Dial
   body += "<div class='dial-box' id='rest-dial-box'>";
   body += "<div class='dial-title'>Rest Angle</div>";
-  body += "<div class='dial-sub'>Hovering just above button</div>";
+  body += "<div class='dial-sub'>Hovering Just Above Button</div>";
   body += "<div class='dial-svg-wrap' id='rest-dial-wrap'>";
   body += "<svg class='dial-svg' viewBox='0 0 160 160'>";
   body += "<path class='dial-bg' d='M 60.16 134.50 A 58 58 0 1 1 99.84 134.50'/>";
@@ -393,7 +438,7 @@ inline String generateCalibratePage(int curRest, int curPress, int curDur, bool 
   // Press Angle Dial
   body += "<div class='dial-box' id='press-dial-box'>";
   body += "<div class='dial-title'>Press Angle</div>";
-  body += "<div class='dial-sub'>Pushing button fully</div>";
+  body += "<div class='dial-sub'>Pushing Button Fully</div>";
   body += "<div class='dial-svg-wrap' id='press-dial-wrap'>";
   body += "<svg class='dial-svg' viewBox='0 0 160 160'>";
   body += "<path class='dial-bg' d='M 60.16 134.50 A 58 58 0 1 1 99.84 134.50'/>";
@@ -415,7 +460,7 @@ inline String generateCalibratePage(int curRest, int curPress, int curDur, bool 
   body += "<div class='cal-row no-copy'>";
   body += "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;'>";
   body += "<div><div style='font-size:14px;font-weight:600;color:var(--on-surface);'>Press Duration</div>";
-  body += "<div style='font-size:11.5px;color:var(--on-surface-v);'>Hold duration during tap</div></div>";
+  body += "<div style='font-size:11.5px;color:var(--on-surface-v);'>Hold Duration During Tap</div></div>";
   body += "<div class='cal-num-box'>";
   body += "<input type='text' inputmode='numeric' pattern='[0-9]*' id='dur-num' value='" + String(curDur) + "' class='cal-num-raw'>";
   body += "<span style='font-size:12px;font-weight:600;color:var(--on-surface-v);margin-left:4px;'>ms</span>";
@@ -432,7 +477,7 @@ inline String generateCalibratePage(int curRest, int curPress, int curDur, bool 
   body += "<button type='button' id='btn-hold' class='btn-hold'>";
   body += "&#128071; Press &amp; Hold</button>";
   body += "<div style='font-size:12px;color:var(--on-surface-v);margin-top:12px;line-height:1.4;'>";
-  body += "Hold to press servo live to Press Angle &bull; Release to return to Rest Angle</div>";
+  body += "Hold to press servo live to Press Angle<br>Release to return to Rest Angle</div>";
   body += "</div>";
 
   // Action Buttons: Save, Test, Reset (SEPARATED FROM PRESS & HOLD BUTTON)
@@ -762,7 +807,7 @@ inline String generateCalibratePage(int curRest, int curPress, int curDur, bool 
   calScript.replace("{{PRESS}}", String(curPress));
   calScript.replace("{{DUR}}", String(curDur));
 
-  return wrapPage("Servo Calibration", "&#127919;", body.c_str(), calScript.c_str());
+  sendWrappedPage(server, "Servo Calibration", "&#127919;", body.c_str(), calScript.c_str());
 }
 
 /**
@@ -778,8 +823,7 @@ inline void registerCalibrationRoutes(WebServer &server) {
       String script = generateCurlCalibrateScript(host);
       server.send(200, "text/plain; charset=utf-8", script);
     } else {
-      String page = generateCalibratePage(restAngle, pressAngle, pressDurationMs, isCalibrated);
-      server.send(200, "text/html; charset=utf-8", page);
+      sendCalibratePage(server, restAngle, pressAngle, pressDurationMs, isCalibrated);
     }
   });
 

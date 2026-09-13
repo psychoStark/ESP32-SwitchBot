@@ -1,8 +1,8 @@
 #pragma once
 #include <Arduino.h>
+#include <WebServer.h>
 
-// --- Shared UI: CSS + page wrapper ---
-
+// Shared CSS styling for all web pages (cyber-dark theme and responsive cards)
 static const char COMMON_CSS[] =
 "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');"
 ":root{--bg:#000000;--surface:rgba(15,23,36,0.72);--surface-c:rgba(26,38,56,0.65);"
@@ -82,6 +82,8 @@ static const char COMMON_CSS[] =
 ".log-badge.standby{background:rgba(138,180,248,0.15);border:1px solid rgba(138,180,248,0.3);color:var(--primary);}"
 ".actions{display:flex;gap:12px;margin-top:10px;}"
 ".actions form{flex:1;margin:0;}"
+"input[type=password]{height:48px;min-height:48px;background:var(--surface-c);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid var(--surface-border);color:var(--on-surface);font-family:'Inter',sans-serif;font-size:13px;padding:0 16px;border-radius:24px;box-sizing:border-box;outline:none;text-align:center;transition:all .2s ease;}"
+"input[type=password]:focus{border-color:var(--primary);box-shadow:0 0 16px rgba(138,180,248,0.25);}"
 "button{width:100%;display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--surface-c);"
 "backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid var(--surface-border);color:var(--on-surface);"
 "font-family:'Inter',sans-serif;font-weight:600;letter-spacing:0.4px;text-transform:uppercase;padding:0 18px;border-radius:24px;"
@@ -105,13 +107,12 @@ static const char COMMON_CSS[] =
 ".pill.standby{background:rgba(138,180,248,0.15);border:1px solid rgba(138,180,248,0.3);color:var(--primary);}"
 ".divider{border:none;border-top:1px solid var(--outline);margin:24px 0;}";
 
-// Visibility-gated polling: replaces "poll forever every 1s" with
-// "poll every 1s only while this tab is actually visible".
+// Background script that updates stats every 3.5 seconds only while the tab is open
 static const char POLL_SCRIPT[] =
 "<script>"
 "let __poll;"
 "function __fmtAgo(s){"
-"if(s<=2)return 'just now';"
+"if(s<=2)return 'Just now';"
 "let d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60),sec=s%60,o='';"
 "if(d>0)o+=d+'d ';"
 "if(h>0)o+=h+'h ';"
@@ -132,7 +133,7 @@ static const char POLL_SCRIPT[] =
 "var el;"
 "if(el=document.getElementById('up'))el.textContent=d.u;"
 "if(el=document.getElementById('upf'))el.textContent=d.uf;"
-"if(el=document.getElementById('tmp'))el.innerHTML=d.t+' &deg;C';"
+"if(el=document.getElementById('tmp'))el.innerHTML=(d.t>-50?(d.t+' &deg;C'):'-');"
 "if(el=document.getElementById('pwr'))el.textContent='~'+d.p+' W';"
 "if(el=document.getElementById('ram'))el.textContent=d.ru+'/'+d.rt+' KB';"
 "if(el=document.getElementById('clk'))el.textContent=d.c+' MHz';"
@@ -146,6 +147,11 @@ static const char POLL_SCRIPT[] =
 "el.textContent=d.ts_st;el.className='pill '+d.ts_cls;"
 "}"
 "if(el=document.getElementById('ts-ip'))el.textContent=d.ts_ip;"
+"var ipR=document.getElementById('ts-ip-row');"
+"if(ipR){"
+"if(d.ts_ip&&d.ts_ip!=='-'&&d.ts_ip!=='Not Valid'){ipR.style.display='';}"
+"else{ipR.style.display='none';}"
+"}"
 "if(el=document.getElementById('ts-conn'))el.textContent=d.ts_conn;"
 "var r=document.getElementById('ts-connect-row');"
 "if(r){"
@@ -153,12 +159,13 @@ static const char POLL_SCRIPT[] =
 "else{r.style.display='none';}"
 "}"
 "}).catch(function(){});}"
-"function __pollStart(){if(__poll)return;__pollTick();__poll=setInterval(__pollTick,1000);}"
+"function __pollStart(){if(__poll)return;__pollTick();__poll=setInterval(__pollTick,3500);}"
 "function __pollStop(){if(__poll){clearInterval(__poll);__poll=null;}}"
 "document.addEventListener('visibilitychange',function(){if(document.hidden)__pollStop();else __pollStart();});"
 "if(!document.hidden)__pollStart();"
 "</script>";
 
+// Helper script for copy-to-clipboard actions and mobile vibration feedback
 static const char HAPTIC_SCRIPT[] =
 "<script>"
 "function __showToast(msg){"
@@ -226,30 +233,30 @@ static const char HAPTIC_SCRIPT[] =
 "function __initLogToggles(){"
 "document.querySelectorAll('.card').forEach(function(card){"
 "var items=card.querySelectorAll('.log-item');"
-"if(items.length>5&&!card.querySelector('.btn-log-toggle')){"
+"if(items.length>3&&!card.querySelector('.btn-log-toggle')){"
 "var wrap=document.createElement('div');"
 "wrap.className='log-expandable';"
 "var inner=document.createElement('div');"
 "inner.className='log-expandable-inner';"
 "wrap.appendChild(inner);"
-"items[4].style.borderBottom='none';"
-"for(var i=5;i<items.length;i++){"
+"items[2].style.borderBottom='none';"
+"for(var i=3;i<items.length;i++){"
 "inner.appendChild(items[i]);"
 "}"
 "items[items.length-1].style.borderBottom='none';"
 "card.appendChild(wrap);"
-"var moreCount=items.length-5;"
+"var moreCount=items.length-3;"
 "var btn=document.createElement('button');"
 "btn.type='button';"
 "btn.className='btn-log-toggle no-copy';"
-"btn.innerHTML='<span>Show more ('+moreCount+' more)</span><span class=\"log-arrow\">&#9662;</span>';"
+"btn.innerHTML='<span>Show More ('+moreCount+' more)</span><span class=\"log-arrow\">&#9662;</span>';"
 "var exp=false;"
 "btn.addEventListener('click',function(e){"
 "e.stopPropagation();"
 "exp=!exp;"
 "wrap.classList.toggle('expanded',exp);"
 "var lbl=btn.querySelector('span');"
-"if(lbl)lbl.textContent=exp?'Show less':('Show more ('+moreCount+' more)');"
+"if(lbl)lbl.textContent=exp?'Show Less':('Show More ('+moreCount+' more)');"
 "var arr=btn.querySelector('.log-arrow');"
 "if(arr)arr.style.transform=exp?'rotate(180deg)':'rotate(0deg)';"
 "if(navigator.vibrate)navigator.vibrate(8);"
@@ -262,6 +269,7 @@ static const char HAPTIC_SCRIPT[] =
 "else{__initLogToggles();}"
 "</script>";
 
+// Wraps an HTML body with the standard page header, CSS styles, and footer
 inline String wrapPage(const char* title, const char* icon, const char* bodyHtml, const char* extraScript = "", bool centered = false) {
   String out;
   out.reserve(strlen(bodyHtml) + sizeof(COMMON_CSS) + sizeof(HAPTIC_SCRIPT) + strlen(extraScript) + 500);
@@ -281,4 +289,44 @@ inline String wrapPage(const char* title, const char* icon, const char* bodyHtml
   out += extraScript;
   out += "</body></html>";
   return out;
+}
+
+// Streams web pages in small pieces to save memory and keep the chip fast
+template <typename F>
+inline void sendWrappedPageStream(WebServer &server, const char* title, const char* icon, F bodyWriter, const char* extraScript = "", bool centered = false) {
+  server.sendHeader("Connection", "close");
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html; charset=utf-8", "");
+
+  String head;
+  head.reserve(sizeof(COMMON_CSS) + 400);
+  head = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'><title>";
+  head += title;
+  head += "</title><link rel='icon' href='data:image/svg+xml,%3Csvg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"%3E%3Ctext y=\".9em\" font-size=\"90\"%3E";
+  head += icon;
+  head += "%3C/text%3E%3C/svg%3E'><style>";
+  head += COMMON_CSS;
+  head += "</style></head><body><div class='wrap";
+  if (centered) head += " centered";
+  head += "'>";
+  server.sendContent(head);
+
+  bodyWriter();
+
+  String foot;
+  foot.reserve(sizeof(HAPTIC_SCRIPT) + (extraScript ? strlen(extraScript) : 0) + 100);
+  foot = "</div>";
+  foot += HAPTIC_SCRIPT;
+  if (extraScript && extraScript[0]) {
+    foot += extraScript;
+  }
+  foot += "</body></html>";
+  server.sendContent(foot);
+  server.sendContent(""); // Terminate chunked transfer
+}
+
+inline void sendWrappedPage(WebServer &server, const char* title, const char* icon, const char* bodyHtml, const char* extraScript = "", bool centered = false) {
+  sendWrappedPageStream(server, title, icon, [&server, bodyHtml]() {
+    server.sendContent(bodyHtml);
+  }, extraScript, centered);
 }
