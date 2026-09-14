@@ -61,4 +61,5 @@ ehthumbs.db
 # Node & VitePress Documentation
 node_modules/
 docs/.vitepress/dist/
-docs/.vitepress/cache/
+docs/.vitepress/cache/AGENTS.md
+AGENTS.md
