@@ -23,12 +23,13 @@ This document provides a deep, comprehensive technical specification of the **ES
 The ESP32-SwitchBot firmware converts an Espressif microcontroller into a reliable, remotely-accessible switch actuator. It mechanically actuates power buttons, toggles, or appliances via an RC servo motor upon authenticated command.
 
 > [!NOTE]
-> **Custom Modified `microlink` Component:**
-> This project uses a tailored, modified version of the `microlink` Tailscale client located in `components/microlink/`:
+> **Custom Modified [`microlink`](https://github.com/CamM2325/microlink) Component:**
+> This project uses a tailored, modified version of the [microlink](https://github.com/CamM2325/microlink) Tailscale client located in `components/microlink/`:
 > * **High Availability Subnet Routing:** Custom route advertising logic (`ml_conf.advertise_routes = "192.168.1.0/24"`) integrated directly into the WireGuard manager.
 > * **Linker-Wrapped Outbound Routing:** GNU linker intercept (`__wrap_ip4_route_src_hook` in `ml_wg_mgr.c`) directing CGNAT `100.64.0.0/10` return traffic back through the WireGuard interface (`s_wg_netif`).
 > * **Inbound Packet Remapping:** Interface mapping in `wireguardif.c` ensuring packets addressed to the local IP (`192.168.1.50`) pass directly to lwIP rather than getting forwarded or dropped.
-> * **Power Clamping:** Clamps Wi-Fi RF output power to 13 dBm (`ml_conf.wifi_tx_power_dbm = 13`) and reduces maximum peers to 8 to minimize memory and thermal footprint.
+> * **Power & Signal Optimization:** Sets Wi-Fi RF output power to 15 dBm (`WIFI_POWER_15dBm`) for a +2 dBm link margin across walls while keeping chip temperature cool (~38–41°C) with modem sleep.
+> * **L2 ARP Keepalive:** Integrated Gratuitous ARP (`CONFIG_LWIP_ESP_GRATUITOUS_ARP=y`) and periodic Gateway ARP probes ensuring consumer routers (such as BSNL ONT) never expire the sleeping ESP32 from their routing tables.
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────────┐
@@ -37,9 +38,10 @@ The ESP32-SwitchBot firmware converts an Espressif microcontroller into a reliab
 │                CORE 0                 │                CORE 1                 │
 ├───────────────────────────────────────┼───────────────────────────────────────┤
 │  • http_srv Task (Priority 4, 6 KB)   │  • arduino_loop Task (Priority 1, 8KB)│
-│    - WebServer request dispatching    │    - Event-driven ulTaskNotifyTake()  │
-│    - Chunked HTTP streaming engine    │    - Instant async servo actuation    │
-│    - Zero-heap /api/live endpoint     │    - 60s NVS heartbeat persistence    │
+│    - WebServer request dispatching    │    - Responsive 10ms loop scheduling  │
+│    - Static cached /style.css & app.js│    - Instant async servo actuation    │
+│    - Chunked HTTP streaming engine    │    - 60s NVS heartbeat persistence    │
+│    - Zero-heap /api/live endpoint     │    - Wi-Fi failover & ARP keepalives  │
 │  • ml_net_io Task (Priority 5, 6 KB)  │  • ml_wg_mgr Task (Priority 6, 8 KB)  │
 │    - DERP TLS socket transport        │    - WireGuard ChaCha20-Poly1305      │
 │    - Control plane HTTPS sessions     │    - Handshake timers & peer sessions │
@@ -49,8 +51,9 @@ The ESP32-SwitchBot firmware converts an Espressif microcontroller into a reliab
 ### Core Design Principles:
 1. **Zero Client Software:** Direct browser rendering or interactive Bash TUI streaming directly to `curl`. No mobile apps, proprietary cloud bridges, or daemon background services on client devices.
 2. **Deterministic Response Time (< 5ms):** Asynchronous decoupling ensures that HTTP requests receive an instant response before the physical mechanical motion completes, preventing timeouts over high-latency cellular connections.
-3. **Thermal & Energy Efficiency:** Operates at 80 MHz CPU clock with 13 dBm Wi-Fi output power and modem sleep, keeping chip temperatures low (~38–41°C).
+3. **Thermal & Energy Efficiency:** Operates at 80 MHz CPU clock with 15 dBm Wi-Fi output power and modem sleep, keeping chip temperatures low (~38–41°C).
 4. **Flash Wear Minimization:** Ring buffers and throttled heartbeats guarantee decades of continuous 24/7 operation without flash exhaustion.
+5. **Payload Optimization:** Browser caching for CSS (`/style.css`) and JS (`/app.js`) reduces subsequent page payloads to under 1 KB (95% cut), eliminating high-latency DERP round trips.
 
 ---
 
@@ -89,7 +92,7 @@ The ESP32-SwitchBot firmware converts an Espressif microcontroller into a reliab
 
 ## 3. Embedded Tailscale VPN & Subnet Routing Engine
 
-The firmware embeds a full WireGuard and Tailscale coordination client via `microlink`.
+The firmware embeds a full WireGuard and Tailscale coordination client via [microlink](https://github.com/CamM2325/microlink).
 
 ```
                     ┌──────────────────────────────────────────────┐
@@ -156,16 +159,25 @@ ml_conf.advertise_routes = "192.168.1.0/24";
 Running an active WireGuard node on an ESP32 increases power consumption and elevates chip temperatures by 8–12°C. To maintain peak efficiency, the firmware uses an intelligent cloud watchdog:
 1. **HTTPS API Polling:** Every 45 seconds, the ESP32 queries the official Tailscale API (`api.tailscale.com`) via HTTPS using `esp_http_client` and the ESP-IDF root certificate bundle.
 2. **Cold Standby:** As long as the primary router (e.g. `moto-g32`) reports `connected: true`, the ESP32 keeps its onboard Tailscale engine turned off (`microlink_stop()`).
-3. **Automatic Failover:** If the primary router misses 2 consecutive checks (~90 seconds), the ESP32 automatically starts `microlink` and assumes active routing.
+3. **Automatic Failover:** If the primary router misses 2 consecutive checks (~90 seconds), the ESP32 automatically starts [microlink](https://github.com/CamM2325/microlink) and assumes active routing.
 4. **Self-Healing Recovery (How Reconnection is Detected):** The watchdog queries the official Tailscale REST API (`api.tailscale.com`) every 45 seconds over HTTPS and inspects the `connectedToControl` boolean field for the primary subnet router device. As soon as the primary router reconnects to the Tailscale control plane (`connectedToControl: true`), the ESP32 detects this, automatically calls `stopTailscale()`, relinquishes active subnet routing, and returns to Cold Standby (~38–41°C).
 
 ---
 
-### D. 100% Local / Zero-Key Operation
-If you do not use Tailscale:
-* Set `TAILSCALE_KEY` and `TAILSCALE_API_KEY` to `""` in `secrets.h`.
-* **System Effect:** Tailscale initialization is completely skipped.
-* **Benefits:** Reclaims ~180 KB of internal RAM, reduces operating temperature to ~38°C, and runs completely offline with zero external network dependencies.
+### D. 100% Local Mode (`FULLY_LOCAL_MODE`)
+If you do not use Tailscale, or are configuring the device strictly for LAN operation:
+* In `main/secrets.h`, configure `#define FULLY_LOCAL_MODE 1` (or answer `Yes` in `setup_secrets.py`).
+* **System Effect:** The entire Microlink and WireGuard stack is completely bypassed at runtime.
+* **UI Adaptation:** All Tailscale status pills, IP rows, session duration cards, and cURL Tailscale sections are **completely stripped** from the Web UI and cURL dashboards. The device presents a pure, minimal LAN switch interface.
+* **Benefits:** Reclaims ~180 KB of internal RAM, lowers idle temperature to ~38°C, and eliminates any external cloud/API polling.
+
+---
+
+### E. Multi-Network Wi-Fi Failover (Up to 6 Networks)
+The firmware supports resilient multi-network failover across up to 6 configured Wi-Fi networks:
+* **Slots:** `WIFI_SSID_1` / `WIFI_PASSWORD_1` is the primary home network. Slots `2` through `6` are optional fallback networks (e.g., phone mobile hotspot, secondary router, guest network).
+* **Automatic Reconnect & Failover:** Monitored continuously by `checkWifiReconnectIfNeeded()`. If Wi-Fi is lost for > 15 seconds, the ESP32 automatically disconnects and attempts connection to the next configured fallback network in sequence.
+* **NVS Forensic Attribution:** The active network slot index (`wifiIdx`) is persistently updated in the active `BootLog` entry in NVS flash. When reviewing reboot or crash history in `/debug` or cURL, each boot record explicitly displays the connected SSID (omitted if only 1 network is configured).
 
 ---
 
@@ -175,32 +187,45 @@ If you do not use Tailscale:
 
 | Task Name | Core | Priority | Stack Size | Function & Responsibility |
 |---|---|---|---|---|
-| `http_srv` | **Core 0** | 4 | 6,144 bytes | Accepts incoming TCP connections, parses HTTP, serves chunked responses. |
-| `ml_net_io` | **Core 0** | 5 | 6,144 bytes | Socket I/O and TLS transport for DERP and control plane. |
-| `ml_wg_mgr` | **Core 1** | 6 | 8,192 bytes | WireGuard peer management, handshake timers, and cryptography. |
-| `arduino_loop`| **Core 1** | 1 | 8,192 bytes | Event-driven servo actuation, NVS heartbeats, OTA updates, watchdog checks. |
+| `http_srv` | **Core 0** | 4 | 6,144 bytes | Accepts incoming TCP connections, parses HTTP, serves chunked responses with 2ms yield. |
+| `ts_watchdog`| **Core 0** | 1 | 8,192 bytes | Background watchdog querying `api.tailscale.com` over HTTPS every 45s; keeps TLS calls completely off Core 1. |
+| `ml_net_io` | **Core 0** | 5 | 6,144 bytes | Socket I/O and TLS transport for DERP and control plane (bypassed in Fully Local mode). |
+| `ml_wg_mgr` | **Core 1** | 6 | 8,192 bytes | WireGuard peer management, handshake timers, and cryptography (bypassed in Fully Local mode). |
+| `arduino_loop`| **Core 1** | 1 | 8,192 bytes | Dedicated instantaneous servo actuation, NVS heartbeats, OTA updates, 10ms responsive sleep. |
 
-### Event-Driven Task Scheduling (`ulTaskNotifyTake`)
+### Event-Driven Task Scheduling & Responsive Sleep
 Traditional firmware models poll the Arduino `loop()` continuously with `vTaskDelay(20)`. In this firmware:
-* `loop()` blocks on `ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100))`.
-* When an HTTP request arrives, `handleRoot()` fires `xTaskNotifyGive(loopTaskHandle)`.
-* Core 1 wakes up **instantly (< 1 ms)** to actuate the servo.
-* When idle, the task sleeps for 100 ms instead of 20 ms, **saving 80% of Core 1 idle wakeups**.
-* Combined with `CONFIG_FREERTOS_USE_TICKLESS_IDLE=y` and `CONFIG_ESP_WIFI_SLP_IRAM_OPT=y`, the chip achieves maximum power and thermal efficiency.
+* `loop()` yields with `ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10))`.
+* When an HTTP actuation request arrives, `handleRoot()` fires `xTaskNotifyGive(loopTaskHandle)`.
+* Core 1 wakes up **instantly (< 1 ms)** to actuate the servo. Because the blocking Tailscale API watchdog was decoupled into its own Core 0 background task (`ts_watchdog`), Core 1 is **never blocked** by TLS handshakes or network queries, guaranteeing zero-latency motor actuation on every trigger.
+* During the 10 ms idle interval, `CONFIG_FREERTOS_USE_TICKLESS_IDLE=y` and `CONFIG_ESP_WIFI_SLP_IRAM_OPT=y` allow the Xtensa core to enter the hardware `waiti 0` low-power sleep state, preserving low temperature (~39–41°C) while maintaining crisp sub-15ms response latency.
+* **L2 ARP Keepalive:** `sendLanArpKeepaliveIfNeeded()` fires every 45s, broadcasting a Gratuitous ARP frame (`etharp_gratuitous`) and probing the gateway (`etharp_request`) to keep consumer router ARP tables permanently warm during Wi-Fi modem sleep.
 
 ---
 
-## 5. Memory Pipeline & Chunked HTTP Streaming Engine
+## 5. Memory Pipeline, Chunked HTTP & Static Asset Caching Engine
 
 ### 1. Zero-Heap Live Telemetry (`/api/live`)
 * Web clients poll `/api/live` every 3.5 seconds.
-* To prevent heap fragmentation, the handler uses stack-allocated buffers (`char json[700]`) formatted directly with `snprintf()`.
+* To prevent heap fragmentation, the handler uses stack-allocated buffers (`char json[896]`) formatted directly with `snprintf()`.
 * **Zero heap allocations** occur during continuous telemetry polling.
 
-### 2. Chunked HTTP Web Streaming (`sendWrappedPageStream`)
+### 2. Static Asset Separation & Browser Caching (`/style.css` & `/app.js`)
+* **Shared CSS:** `COMMON_CSS` (~10.9 KB) is served at `/style.css` with `Cache-Control: public, max-age=604800, immutable`.
+* **Shared JS:** `APP_JS` (~3.8 KB) bundles client haptics, clipboard copies, collapsible log accordions, and background live polling into `/app.js` with `Cache-Control: public, max-age=604800, immutable`.
+* **Zero-Script HTML:** Completely eliminates the 1.2 KB inline `POLL_SCRIPT` from page responses, slashing HTML transfer sizes and eliminating `t=0ms` request storms. Polling begins seamlessly 3.5s after initial page render.
+* **Payload Impact:**
+  * HTML for `/main` shrank from ~16 KB down to **788 bytes** (**95% payload reduction**).
+  * HTML for `/info` shrank from ~23 KB down to **5.3 KB**.
+  * Browsers download CSS & JS once and cache them locally for 7 days. Subsequent page navigation is near-instantaneous, eliminating high-latency DERP round trips over Tailscale.
+  * Slashes active Wi-Fi radio transmission time by **~80%**, keeping the RF power amplifier cool.
+
+### 3. Zero-Allocation Chunked HTTP Web Streaming (`sendWrappedPageStream`)
 * In traditional ESP32 implementations, full HTML pages are concatenated into monolithic `String` buffers (`String.reserve(35000)`), causing 35–52 KB heap allocation spikes.
-* **Stream Implementation:** Defined in [`main/web_pages.h`](main/web_pages.h). Web pages (`/info`, `/debug`, `/calibrate`, `/`, `/main`) are streamed in compact chunks via HTTP/1.1 chunked transfer encoding (`server.sendContent()`).
-* **Result:** Peak heap spikes during page loads drop from **52 KB to ZERO**. The browser begins parsing CSS and HTML immediately as chunks arrive.
+* **Stream Implementation:** Defined in [`main/web_pages.h`](main/web_pages.h). Web pages (`/info`, `/debug`, `/calibrate`, `/`, `/main`) are streamed in compact chunks via HTTP/1.1 chunked transfer encoding (`server.sendContent()` and `server.sendContent_P()`).
+* `<head>` tags, stylesheets, and wrappers are streamed with zero dynamic heap buffer allocation.
+* cURL output in `handleDebug()` streams section-by-section directly, eliminating 4.8 KB dynamic buffer allocations.
+* Log timestamp formatting uses stack buffers (`formatTimestampBuf()`), eliminating dozens of heap malloc/free cycles per request.
 
 ---
 
@@ -211,7 +236,7 @@ To prevent flash memory wear while maintaining complete system observability, th
 ```
 NVS "esp_log" Namespace:
 ┌─────┬─────┬─────┬─────┬─────┬┄┄┄┄┄┬──────┐
-│ b0  │ b1  │ b2  │ b3  │ b4  │     │ b49  │  (50 Boot History Slots)
+│ b0  │ b1  │ b2  │ b3  │ b4  │     │ b49  │  (50 Boot History Slots, with wifiIdx)
 └─────┴─────┴─────┴─────┴─────┴┄┄┄┄┄┴──────┘
 
 NVS "servo_log" Namespace:
@@ -242,28 +267,29 @@ NVS "ts_log" Namespace:
 Defined in [`main/calibration.h`](main/calibration.h):
 
 ```
-        -180° / +180°
-              │
-      ┌───────┴───────┐
-      │               │
--90° ─┤   REST DIAL   ├─ +90°
-      │  (Default 0°) │
-      └───────┬───────┘
-              │
-          [GAP 40°]   ◄── Anti-Flip Barrier Prevents 360° Wrap
-              │
-      ┌───────┴───────┐
-      │               │
--90° ─┤  PRESS DIAL   ├─ +90°
-      │ (Default 10°) │
-      └───────┬───────┘
-              │
-         HOLD DURATION
-           (50-3000ms)
+             90° (Center)
+                  │
+          ┌───────┴───────┐
+          │               │
+     0° ──┤   REST DIAL   ├── 180°
+          │ (Default 90°) │
+          └───────┬───────┘
+                  │
+              [GAP 40°]   ◄── Anti-Flip Barrier Prevents 360° Wrap
+                  │
+          ┌───────┴───────┐
+          │               │
+     0° ──┤  PRESS DIAL   ├── 180°
+          │(Default 100°) │
+          └───────┬───────┘
+                  │
+             HOLD DURATION
+              (50-3000ms)
 ```
 
 ### Safety Features:
-* **Bottom-Gap Barrier:** Rotary dials enforce a 40° deadzone at the bottom of the circle, preventing rotational phase wraps between -180° and +180°.
+* **Bottom-Gap Barrier:** Rotary dials enforce a 40° deadzone at the bottom of the circle, preventing rotational phase wraps between 0° and 180°.
+* **Direct Numeric Input & Touch Isolation:** Tapping the center angle badges isolates touch/pointer events from the rotary dial gesture handlers, auto-selects the text, and opens the numeric keypad for exact typed entry without accidental motor movement.
 * **Live Position Preview:** Rotating the Rest dial sends debounced `POST /api/calibrate/move` requests, moving the servo arm live so you can visually verify alignment without saving.
 * **Press & Hold Validation:** Pressing the hold button (`POST /api/calibrate/hold?state=1`) drives the servo to the press angle and holds it until release (`state=0`), verifying mechanical clearance.
 * **NVS Persistence:** Saved to `servo_cal` namespace (`rest_angle`, `press_angle`, `press_dur`).
@@ -288,6 +314,29 @@ When requested by `curl`, `/main` streams an interactive, full-screen Bash scrip
 * **Zero-Auth Upload Window:** When unlocked, the port accepts uploads directly from standard PlatformIO, Arduino IDE, or `espota.py` without requiring upload flags.
 * **Self-Closing Timer:** Port 3232 automatically closes after 10 minutes (`OTA_AUTO_TIMEOUT_MS = 600,000 ms`), leaving no permanent open ports.
 
+### Flashing Over Multi-Network & VPN Hosts (`-I <lan_ip>`)
+
+When invoking `espota.py` from a host development machine connected to multiple network adapters (e.g., physical local Wi-Fi `192.168.1.2`, alongside Tailscale `100.x.x.x`, Docker bridge networks, or a corporate VPN tunnel), OTA uploads may fail:
+
+```text
+Uploading...................
+[ERROR]: Error Uploading: [Errno 32] Broken pipe
+```
+
+#### Why This Happens:
+1. **Reverse Connection Handshake:** The Arduino/ESP32 OTA protocol does not receive the firmware stream purely over the outbound command socket. Instead:
+   - `espota.py` sends a UDP invitation packet to the ESP32 (port 3232) announcing that an update is pending. This packet includes the IP address and port that `espota.py` expects the ESP32 to reach back to.
+   - The ESP32 then initiates an inbound **reverse TCP connection** back to the host machine to pull the binary stream.
+2. **Interface Ambiguity (`0.0.0.0`):** By default, `espota.py` binds its local server to `0.0.0.0` and attempts to guess the host machine's IP. When virtual interfaces (Tailscale `100.x.x.x`, VPN tun/tap, Docker `172.17.x.x`) are active, `espota.py` frequently selects the virtual adapter IP instead of the physical local LAN interface.
+3. **Unreachable Routing:** Because the ESP32 is on the physical local Wi-Fi (`192.168.1.0/24`), it cannot route to the host machine's virtual adapter IP without an established route/tunnel on the microcontroller. The reverse connection times out, throwing an immediate `[Errno 32] Broken pipe`.
+
+#### The Fix:
+Specify the `-I` (capital `i`) parameter with your development computer's local Wi-Fi / Ethernet LAN IP:
+```bash
+python3 components/arduino/tools/espota.py -i 192.168.1.50 -p 3232 -I 192.168.1.2 -f build/ESP32-SwitchBot.bin
+```
+Passing `-I 192.168.1.2` binds `espota.py` specifically to your physical local Wi-Fi interface and instructs the ESP32: *"Connect back directly to physical IP `192.168.1.2`."* This guarantees a direct, local transfer that completes seamlessly without timeouts or broken pipes.
+
 ---
 
 ## 10. In-Code Variables, Customization & Network Gotchas
@@ -296,14 +345,25 @@ The following table documents all user-configurable parameters in [`main/main.cp
 
 | Variable | File & Line | Default Value | Description, Considerations & Gotchas |
 |---|---|---|---|
-| `local_IP` | `main.cpp:61` | `192.168.1.50` | Static IP of the ESP32. Must be outside your router's DHCP pool or assigned as a static DHCP reservation to avoid IP conflicts. |
-| `gateway` | `main.cpp:62` | `192.168.1.1` | Local network router gateway. Must match your router's IP for NTP and internet API access. |
-| `subnet` | `main.cpp:63` | `255.255.255.0` | Subnet mask (`/24`). Must match your local network configuration. |
-| `SERVO_PIN` | `main.cpp:68` | `1` | PWM signal pin. Must use a PWM-capable GPIO that is not a strapping pin. |
-| `PRESS_COOLDOWN_MS`| `main.cpp:71` | `2000` (2s) | Cooldown period between successive button actuations to protect the motor. |
-| `HEARTBEAT_INTERVAL_MS`| `main.cpp:89`| `60000` (60s) | NVS timestamp write interval. 60s cuts flash writes by 50% vs 30s while maintaining precise downtime estimation. |
-| `OTA_AUTO_TIMEOUT_MS` | `main.cpp:120`| `600000` (10m)| Inactivity timeout for the OTA listener before automatically locking port 3232. |
-| `advertise_routes` | `main.cpp:1888`| `"192.168.1.0/24"`| Tailscale advertised subnet CIDR. Must match your local network subnet for HA failover. |
-| `TAILSCALE_KEY` | `secrets.h:8` | `""` | Tailscale auth key. Leave empty for 100% local/offline Wi-Fi operation. |
+| `FULLY_LOCAL_MODE` | `secrets.h` / `main.cpp:44` | `0` (or `1`) | Operation mode. Set to `1` to run purely on local LAN / subnet router, stripping all Microlink & Tailscale code and UI elements. |
+| `TIMEZONE_OFFSET` | `main.cpp:51` | `"+05:30"` | Timezone offset string (e.g. `"+05:30"`, `"0530"`, `"+0630"`, `"-05:00"`, `"-0500"`, `"0"`). Used by NTP clock sync. |
+| `WIFI_SSID_1`..`6` | `secrets.h` / `main.cpp:59-89` | `""` | Primary (`1`) and up to 5 optional fallback Wi-Fi network SSIDs for automatic failover. |
+| `WIFI_PASSWORD_1`..`6` | `secrets.h` / `main.cpp:59-89` | `""` | WPA/WPA2 passwords corresponding to each configured Wi-Fi network slot. |
+| `local_IP` | `main.cpp:108` | `192.168.1.50` | Static IP of the ESP32. Must be outside your router's DHCP pool or assigned as a static DHCP reservation to avoid IP conflicts. |
+| `gateway` | `main.cpp:109` | `192.168.1.1` | Local network router gateway. Must match your router's IP for NTP, internet API access, and ARP probes. |
+| `subnet` | `main.cpp:110` | `255.255.255.0` | Subnet mask (`/24`). Must match your local network configuration. |
+| `tailscaleAdvertiseRoute`| `main.cpp:116`| `"192.168.1.0/24"`| Tailscale advertised subnet CIDR. Must match your local network subnet for HA failover. |
+| `servoPin` | `main.cpp:123` | `1` | PWM signal pin. Must use a PWM-capable GPIO that is not a strapping pin. |
+| `PRESS_COOLDOWN_MS`| `main.cpp:186` | `2000` (2s) | Cooldown period between successive button actuations to protect the motor. |
+| `HEARTBEAT_INTERVAL_MS`| `main.cpp:179`| `60000` (60s) | NVS timestamp write interval. 60s cuts flash writes while maintaining 1-minute downtime estimation (safe for 12+ years of continuous flash wear). |
+| `OTA_AUTO_TIMEOUT_MS` | `main.cpp:176`| `600000` (10m)| Inactivity timeout for the OTA listener before automatically locking port 3232. |
+| `BOARD_NAME` | `main.cpp:56` | `""` | Optional manual hardware model override. Leave empty for auto-detection (`ESP32-S3-N16R8`). |
+| `TAILSCALE_KEY` | `secrets.h:8` | `""` | Tailscale auth key. Leave empty or use `FULLY_LOCAL_MODE 1` for 100% local/offline Wi-Fi operation. |
 | `TAILSCALE_API_KEY` | `secrets.h:14`| `""` | Tailscale read-only API key for the subnet failover watchdog. |
+| `TAILSCALE_SUBNET_DEVICE_ID`| `secrets.h:17`| `""` | Primary subnet router device ID or hostname (e.g. `"moto-g32"`). |
 | `OTA_KEY` | `secrets.h:20` | `""` | Passphrase to unlock OTA flashing. Leave empty to allow single-click unlock without a password. |
+
+---
+
+**Current Version:** `v1.2`
+

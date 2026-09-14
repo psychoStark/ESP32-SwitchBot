@@ -57,3 +57,8 @@ ehthumbs.db
 *.temp
 *~
 .*~
+
+# Node & VitePress Documentation
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/

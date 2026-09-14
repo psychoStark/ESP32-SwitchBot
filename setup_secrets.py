@@ -104,27 +104,7 @@ if "--target" in sys.argv:
 
 CLEAR_KEYWORDS = ("-", "clear", "none", "delete", "off", "remove")
 
-FIELDS = [
-    {
-        "key": "WIFI_SSID",
-        "category": "Wi-Fi Configuration",
-        "title": "Wi-Fi Network SSID",
-        "desc": "Name of your Wi-Fi network.",
-        "default": "",
-        "required": True,
-        "is_secret": False,
-        "visible_prefix": "",
-    },
-    {
-        "key": "WIFI_PASSWORD",
-        "category": "Wi-Fi Configuration",
-        "title": "Wi-Fi Password",
-        "desc": "WPA/WPA2 security passphrase for your Wi-Fi network.",
-        "default": "",
-        "required": False,
-        "is_secret": True,
-        "visible_prefix": "",
-    },
+TAILSCALE_FIELDS = [
     {
         "key": "TAILSCALE_KEY",
         "category": "Tailscale Network",
@@ -165,17 +145,19 @@ FIELDS = [
         "is_secret": False,
         "visible_prefix": "",
     },
-    {
-        "key": "OTA_KEY",
-        "category": "Device Security",
-        "title": "OTA Security Password",
-        "desc": "PIN or passphrase required to authorize /ota/enable updates.",
-        "default": "",
-        "required": False,
-        "is_secret": True,
-        "visible_prefix": "",
-    },
 ]
+
+OTA_FIELD = {
+    "key": "OTA_KEY",
+    "category": "Device Security",
+    "title": "OTA Security Password",
+    "desc": "PIN or passphrase required to authorize /ota/enable updates.",
+    "default": "",
+    "required": False,
+    "is_secret": True,
+    "visible_prefix": "",
+}
+
 
 
 def c_escape(val: str) -> str:
@@ -254,6 +236,50 @@ def mask_value(val: str, key: str) -> str:
     elif len(val) <= 6:
         return "*" * len(val)
     return val[:3] + "*" * min(8, len(val) - 6) + val[-3:]
+
+
+def validate_field(key: str, val: str) -> tuple:
+    """Validate field input for length, format, and network protocol standards."""
+    if not val:
+        return True, ""
+
+    if key == "WIFI_SSID":
+        byte_len = len(val.encode("utf-8"))
+        if byte_len > 32:
+            return False, f"SSID is {byte_len} bytes (maximum allowed by 802.11 Wi-Fi standard is 32 bytes)."
+        return True, ""
+
+    elif key == "WIFI_PASSWORD":
+        if len(val) < 8 or len(val) > 63:
+            return False, f"WPA2 Wi-Fi password must be between 8 and 63 characters (currently {len(val)}). Clear it to use an open network."
+        return True, ""
+
+    elif key == "TAILSCALE_KEY":
+        if not val.startswith("tskey-auth-") and len(val) < 15:
+            return False, "Tailscale auth key must start with 'tskey-auth-' or be a valid pre-auth key."
+        return True, ""
+
+    elif key == "TAILSCALE_HOST":
+        if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$', val):
+            return False, "Hostname must be 1-63 alphanumeric characters and hyphens, and cannot start or end with a hyphen (RFC 1123)."
+        return True, ""
+
+    elif key == "TAILSCALE_API_KEY":
+        if not val.startswith("tskey-api-") and len(val) < 15:
+            return False, "Tailscale API token must start with 'tskey-api-' or be a valid access token."
+        return True, ""
+
+    elif key == "TAILSCALE_SUBNET_DEVICE_ID":
+        if " " in val or len(val) > 64:
+            return False, "Subnet device ID / hostname cannot contain spaces or exceed 64 characters."
+        return True, ""
+
+    elif key == "OTA_KEY":
+        if len(val) > 64:
+            return False, "OTA key cannot exceed 64 characters."
+        return True, ""
+
+    return True, ""
 
 
 def read_single_key(allowed_keys: tuple = (), default: str = "") -> str:
@@ -558,6 +584,12 @@ def prompt_field(field: dict, step_num: int, total_steps: int, current_val: str 
             else:
                 val = ""
 
+        # Validate entered value
+        is_valid, err_msg = validate_field(key, val)
+        if not is_valid:
+            print(f"\n  {RED}{GLYPH_WARN} Invalid input: {err_msg}{RESET}")
+            continue
+
         # Display what was entered
         if val != "":
             if field["is_secret"]:
@@ -588,35 +620,141 @@ def prompt_field(field: dict, step_num: int, total_steps: int, current_val: str 
                 break
 
 
-def generate_header_content(values: dict) -> str:
+def prompt_wifi_network(idx: int, existing: dict = None) -> dict:
+    """Prompt for a Wi-Fi network's SSID and password."""
+    is_primary = (idx == 1)
+    title_suffix = "(Primary)" if is_primary else f"(Fallback #{idx})"
+    category = f"Wi-Fi Network #{idx}"
+
+    field_ssid = {
+        "key": f"WIFI_SSID_{idx}",
+        "category": category,
+        "title": f"Wi-Fi SSID {title_suffix}",
+        "desc": "Main home Wi-Fi network." if is_primary else f"Fallback Wi-Fi network #{idx} used if previous networks fail.",
+        "default": "",
+        "required": is_primary,
+        "is_secret": False,
+        "visible_prefix": "",
+    }
+
+    curr_ssid = existing.get("ssid", "") if existing else ""
+    ssid_val = prompt_field(field_ssid, step_num=idx, total_steps=6, current_val=curr_ssid)
+    if not ssid_val and not is_primary:
+        return None
+
+    field_pass = {
+        "key": f"WIFI_PASSWORD_{idx}",
+        "category": category,
+        "title": f"Wi-Fi Password {title_suffix}",
+        "desc": f"WPA/WPA2 passphrase for '{ssid_val}'. Leave empty for open network.",
+        "default": "",
+        "required": False,
+        "is_secret": True,
+        "visible_prefix": "",
+    }
+    curr_pass = existing.get("password", "") if existing else ""
+    pass_val = prompt_field(field_pass, step_num=idx, total_steps=6, current_val=curr_pass)
+
+    return {"ssid": ssid_val, "password": pass_val}
+
+
+def manage_wifi_menu(wifi_networks: list) -> list:
+    """Sub-menu to manage Wi-Fi networks in review stage."""
+    while True:
+        print(f"\n{CYAN}{BOX_TL}{BOX_H * INNER_WIDTH}{BOX_TR}{RESET}")
+        print(f"{CYAN}{BOX_V}{RESET}{BOLD}{'MANAGE WI-FI NETWORKS':^{INNER_WIDTH}}{RESET}{CYAN}{BOX_V}{RESET}")
+        print(f"{CYAN}{BOX_BL}{BOX_H * INNER_WIDTH}{BOX_BR}{RESET}")
+
+        for i, net in enumerate(wifi_networks, start=1):
+            tag = "Primary" if i == 1 else f"Fallback #{i}"
+            pwd_disp = mask_value(net.get("password", ""), "WIFI_PASSWORD")
+            clean_pwd = re.sub(r'\033\[[0-9;]*m', '', pwd_disp)
+            print(f"  {BOLD}[{i}]{RESET} {tag:<14}: {BOLD}{net.get('ssid', '')}{RESET} {DIM}({clean_pwd}){RESET}")
+
+        print(f"\n{BOLD}Options:{RESET}")
+        print(f"  {YELLOW}[1-{len(wifi_networks)}]{RESET} Retype / edit specific network")
+        if len(wifi_networks) < 6:
+            print(f"  {GREEN}[a]{RESET}   Add another fallback network ({len(wifi_networks) + 1}/6)")
+        if len(wifi_networks) > 1:
+            print(f"  {RED}[d]{RESET}   Remove last fallback network (#{len(wifi_networks)})")
+        print(f"  {CYAN}[b]{RESET}   Return to main review menu")
+
+        print(f"\n{BOLD}{CYAN}{GLYPH_PROMPT} Choice: {RESET}", end="", flush=True)
+        try:
+            ch = read_single_key().lower()
+        except (KeyboardInterrupt, EOFError):
+            break
+
+        if ch in ("b", "q", "\r", "\n", ""):
+            break
+        elif ch == "a" and len(wifi_networks) < 6:
+            slot = len(wifi_networks) + 1
+            net = prompt_wifi_network(slot)
+            if net and net.get("ssid"):
+                wifi_networks.append(net)
+                print(f"\n  {GREEN}{GLYPH_CHECK} Added fallback network #{slot}: {net['ssid']}{RESET}")
+        elif ch == "d" and len(wifi_networks) > 1:
+            removed = wifi_networks.pop()
+            print(f"\n  {YELLOW}{GLYPH_INFO} Removed fallback network: {removed['ssid']}{RESET}")
+        elif ch.isdigit():
+            idx = int(ch)
+            if 1 <= idx <= len(wifi_networks):
+                net = prompt_wifi_network(idx, existing=wifi_networks[idx - 1])
+                if net and net.get("ssid"):
+                    wifi_networks[idx - 1] = net
+
+    return wifi_networks
+
+
+def generate_header_content(wifi_networks: list, values: dict, fully_local: bool) -> str:
     """Generate the C++ header file content."""
     lines = [
         "#pragma once",
         "",
-        "// Wi-Fi Credentials",
-        f'#define WIFI_SSID        "{c_escape(values.get("WIFI_SSID", ""))}"',
-        f'#define WIFI_PASSWORD    "{c_escape(values.get("WIFI_PASSWORD", ""))}"',
+        "// Operation Mode",
+        "// Set to 1 to run purely locally (skips Microlink & Tailscale completely)",
+        f"#define FULLY_LOCAL_MODE                 {1 if fully_local else 0}",
+        "",
+        "// Wi-Fi Credentials & Failover Configuration (1 to 6 networks)",
+        f"#define WIFI_NETWORK_COUNT               {len(wifi_networks)}",
+    ]
+    for i in range(1, 7):
+        if i <= len(wifi_networks):
+            net = wifi_networks[i - 1]
+            lines.append(f'#define WIFI_SSID_{i}                      "{c_escape(net.get("ssid", ""))}"')
+            lines.append(f'#define WIFI_PASSWORD_{i}                  "{c_escape(net.get("password", ""))}"')
+        else:
+            lines.append(f'#define WIFI_SSID_{i}                      ""')
+            lines.append(f'#define WIFI_PASSWORD_{i}                  ""')
+
+    main_ssid = wifi_networks[0]["ssid"] if wifi_networks else ""
+    main_pass = wifi_networks[0]["password"] if wifi_networks else ""
+    lines.extend([
+        "",
+        "// Backward compatibility macros",
+        f'#define WIFI_SSID                        "{c_escape(main_ssid)}"',
+        f'#define WIFI_PASSWORD                    "{c_escape(main_pass)}"',
         "",
         "// Tailscale Configuration",
-        f'#define TAILSCALE_KEY    "{c_escape(values.get("TAILSCALE_KEY", ""))}"',
-        f'#define TAILSCALE_HOST   "{c_escape(values.get("TAILSCALE_HOST", ""))}"',
+        f'#define TAILSCALE_KEY                    "{c_escape(values.get("TAILSCALE_KEY", "") if not fully_local else "")}"',
+        f'#define TAILSCALE_HOST                   "{c_escape(values.get("TAILSCALE_HOST", "esp32") if not fully_local else "")}"',
         "",
         "// Tailscale Subnet Router Watchdog configuration.",
         "// If TAILSCALE_API_KEY is empty, the ESP32 directly connects to Tailscale at boot (failover disabled).",
         "// Generate a read-only API access token at: https://login.tailscale.com/admin/settings/keys",
-        f'#define TAILSCALE_API_KEY              "{c_escape(values.get("TAILSCALE_API_KEY", ""))}"',
+        f'#define TAILSCALE_API_KEY                "{c_escape(values.get("TAILSCALE_API_KEY", "") if not fully_local else "")}"',
         "",
         "// Primary subnet router device identifier: either numeric machine ID or hostname (e.g. \"moto-g32\")",
-        f'#define TAILSCALE_SUBNET_DEVICE_ID     "{c_escape(values.get("TAILSCALE_SUBNET_DEVICE_ID", ""))}"',
+        f'#define TAILSCALE_SUBNET_DEVICE_ID       "{c_escape(values.get("TAILSCALE_SUBNET_DEVICE_ID", "") if not fully_local else "")}"',
         "",
         "// OTA Security Key (passphrase or PIN required for Over-The-Air firmware updates)",
-        f'#define OTA_KEY          "{c_escape(values.get("OTA_KEY", ""))}"',
+        f'#define OTA_KEY                          "{c_escape(values.get("OTA_KEY", ""))}"',
         "",
-    ]
+    ])
     return "\n".join(lines)
 
 
-def print_summary(values: dict, show_raw: bool = False):
+def print_summary(wifi_networks: list, values: dict, fully_local: bool, show_raw: bool = False):
     """Print formatted summary table."""
     print(f"\n{CYAN}{BOX_TL}{BOX_H * INNER_WIDTH}{BOX_TR}{RESET}")
     print(f"{CYAN}{BOX_V}{RESET}{BOLD}{'CONFIGURATION REVIEW SUMMARY':^{INNER_WIDTH}}{RESET}{CYAN}{BOX_V}{RESET}")
@@ -624,32 +762,74 @@ def print_summary(values: dict, show_raw: bool = False):
     print(f"{CYAN}{BOX_V}{RESET} {BOLD}#{RESET}  {CYAN}{BOX_V}{RESET} {BOLD}{'Setting':<26}{RESET} {CYAN}{BOX_V}{RESET} {BOLD}{'Configured Value':<36}{RESET} {CYAN}{BOX_V}{RESET}")
     print(f"{CYAN}{BOX_LT}{BOX_H * 4}{BOX_C}{BOX_H * 28}{BOX_C}{BOX_H * 38}{BOX_RT}{RESET}")
 
-    for idx, field in enumerate(FIELDS, start=1):
-        key = field["key"]
-        val = values.get(key, "")
+    rows = []
+    # Operation mode
+    mode_text = f"{CYAN}Fully Local (No Tailscale){RESET}" if fully_local else f"{GREEN}Tailscale Enabled{RESET}"
+    rows.append(("Mode", "Operation Mode", mode_text, "Fully Local (No Tailscale)" if fully_local else "Tailscale Enabled"))
 
-        if not val:
-            if key in ("WIFI_PASSWORD", "OTA_KEY"):
-                display_val = f"{DIM}(no password){RESET}"
-                raw_len = 13
-            else:
-                display_val = f"{DIM}(disabled){RESET}"
-                raw_len = 10
-        elif field["is_secret"] and not show_raw:
-            display_val = mask_value(val, key)
-            raw_len = len(re.sub(r'\033\[[0-9;]*m', '', display_val))
+    # Wi-Fi networks
+    for i, net in enumerate(wifi_networks, start=1):
+        lbl = f"Wi-Fi #{i} (Primary)" if i == 1 else f"Wi-Fi #{i} (Fallback)"
+        ssid = net.get("ssid", "")
+        pwd = net.get("password", "")
+        if show_raw:
+            val_display = f"{ssid} [pwd: {pwd if pwd else '(none)'}]"
+            clean_len = len(val_display)
         else:
-            display_val = f"{GREEN}{val}{RESET}"
-            raw_len = len(val)
+            if pwd:
+                pwd_masked = mask_value(pwd, "WIFI_PASSWORD")
+                clean_pwd = re.sub(r'\033\[[0-9;]*m', '', pwd_masked)
+                val_display = f"{ssid} {DIM}(pass set){RESET}"
+                clean_len = len(ssid) + 11
+            else:
+                val_display = f"{ssid} {DIM}(open){RESET}"
+                clean_len = len(ssid) + 7
+        rows.append((f"W{i}", lbl, val_display, clean_len))
 
-        # Truncate visually if too wide
+    # Tailscale settings
+    if fully_local:
+        rows.append(("-", "Tailscale Network", f"{DIM}(bypassed - local mode){RESET}", 23))
+    else:
+        for f in TAILSCALE_FIELDS:
+            k = f["key"]
+            val = values.get(k, "")
+            if not val:
+                disp = f"{DIM}(disabled){RESET}"
+                rlen = 10
+            elif f["is_secret"] and not show_raw:
+                disp = mask_value(val, k)
+                rlen = len(re.sub(r'\033\[[0-9;]*m', '', disp))
+            else:
+                disp = f"{GREEN}{val}{RESET}"
+                rlen = len(val)
+            rows.append((k, f["title"], disp, rlen))
+
+    # OTA setting
+    ota_val = values.get("OTA_KEY", "")
+    if not ota_val:
+        ota_disp = f"{DIM}(no password){RESET}"
+        ota_len = 13
+    elif not show_raw:
+        ota_disp = mask_value(ota_val, "OTA_KEY")
+        ota_len = len(re.sub(r'\033\[[0-9;]*m', '', ota_disp))
+    else:
+        ota_disp = f"{GREEN}{ota_val}{RESET}"
+        ota_len = len(ota_val)
+    rows.append(("OTA", "OTA Security Password", ota_disp, ota_len))
+
+
+    # Print rows
+    for idx_num, (tag, title, disp_val, raw_len_val) in enumerate(rows, start=1):
+        if isinstance(raw_len_val, str):
+            raw_len = len(re.sub(r'\033\[[0-9;]*m', '', raw_len_val))
+        else:
+            raw_len = raw_len_val
         if raw_len > 36:
-            display_val = display_val[:33] + "..."
+            disp_val = disp_val[:33] + "..."
             pad = 0
         else:
             pad = 36 - raw_len
-
-        print(f"{CYAN}{BOX_V}{RESET} {BOLD}{idx:<2}{RESET} {CYAN}{BOX_V}{RESET} {key:<26} {CYAN}{BOX_V}{RESET} {display_val}{' ' * pad} {CYAN}{BOX_V}{RESET}")
+        print(f"{CYAN}{BOX_V}{RESET} {BOLD}{idx_num:<2}{RESET} {CYAN}{BOX_V}{RESET} {title:<26} {CYAN}{BOX_V}{RESET} {disp_val}{' ' * max(0, pad)} {CYAN}{BOX_V}{RESET}")
 
     print(f"{CYAN}{BOX_BL}{BOX_H * 4}{BOX_BT}{BOX_H * 28}{BOX_BT}{BOX_H * 38}{BOX_BR}{RESET}")
 
@@ -661,58 +841,131 @@ def main():
     print(f"  {GLYPH_INFO} Target destination : {BOLD}{TARGET_FILE}{RESET}")
     print(f"  {GLYPH_INFO} Step-by-step setup  : Confirm with {BOLD}[Y]{RESET} or retype with {BOLD}[n]{RESET}\n")
 
-    # If file already exists, pre-load existing values
+    # Load existing secrets if file exists
+    existing_wifi = []
     existing_values = {}
+    existing_local = False
+
     if TARGET_FILE.exists():
         print(f"  {YELLOW}{GLYPH_WARN} Existing secrets.h detected. Current values loaded as defaults.{RESET}")
         try:
             with open(TARGET_FILE, "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    line = line.strip()
-                    for field in FIELDS:
-                        macro_prefix = f'#define {field["key"]}'
-                        if line.startswith(macro_prefix):
-                            rest = line[len(macro_prefix):].strip()
-                            if rest.startswith('"') and rest.endswith('"'):
-                                existing_values[field["key"]] = rest[1:-1]
+                content = f.read()
+
+            local_m = re.search(r'#define\s+FULLY_LOCAL_MODE\s+([01])', content)
+            if local_m:
+                existing_local = (local_m.group(1) == "1")
+
+            for i in range(1, 7):
+                ssid_m = re.search(rf'#define\s+WIFI_SSID_{i}\s+"([^"]*)"', content)
+                pass_m = re.search(rf'#define\s+WIFI_PASSWORD_{i}\s+"([^"]*)"', content)
+                if ssid_m and ssid_m.group(1):
+                    existing_wifi.append({"ssid": ssid_m.group(1), "password": pass_m.group(1) if pass_m else ""})
+
+            if not existing_wifi:
+                old_ssid_m = re.search(r'#define\s+WIFI_SSID\s+"([^"]*)"', content)
+                old_pass_m = re.search(r'#define\s+WIFI_PASSWORD\s+"([^"]*)"', content)
+                if old_ssid_m and old_ssid_m.group(1):
+                    existing_wifi.append({"ssid": old_ssid_m.group(1), "password": old_pass_m.group(1) if old_pass_m else ""})
+
+            for key in ("TAILSCALE_KEY", "TAILSCALE_HOST", "TAILSCALE_API_KEY", "TAILSCALE_SUBNET_DEVICE_ID", "OTA_KEY"):
+                km = re.search(rf'#define\s+{key}\s+"([^"]*)"', content)
+                if km:
+                    existing_values[key] = km.group(1)
         except Exception:
             pass
 
+    # Step 1: Wi-Fi Setup
+    print(f"\n{CYAN}{BOX_TL}{BOX_H}{BOLD} [Step 1] Wi-Fi Network Setup {RESET}{CYAN}{BOX_H * (BOX_WIDTH - 2 - 1 - 30)}{BOX_TR}{RESET}")
+    print(f"{CYAN}{BOX_V}{RESET}  {BOLD}Configuring Primary & Fallback Wi-Fi Networks{RESET}{' ' * (INNER_WIDTH - 47)}{CYAN}{BOX_V}{RESET}")
+    print(f"{CYAN}{BOX_V}{RESET}  {DIM}Network #1 is mandatory. Up to 5 additional fallback networks optional.{RESET}{' ' * (INNER_WIDTH - 73)}{CYAN}{BOX_V}{RESET}")
+    print(f"{CYAN}{BOX_BL}{BOX_H * INNER_WIDTH}{BOX_BR}{RESET}")
+
+    net1 = prompt_wifi_network(1, existing=existing_wifi[0] if existing_wifi else None)
+    wifi_networks = [net1]
+
+    for slot in range(2, 7):
+        print(f"\n  {CYAN}{GLYPH_PROMPT} Do you want to add another Wi-Fi network (fallback)? [y/N]: {RESET}", end="", flush=True)
+        try:
+            ch = read_single_key(allowed_keys=("y", "n"), default="n")
+        except (KeyboardInterrupt, EOFError):
+            print(f"\n\n{RED}{GLYPH_WARN} Setup cancelled by user.{RESET}\n")
+            sys.exit(1)
+
+        if ch == "y":
+            exist_slot = existing_wifi[slot - 1] if len(existing_wifi) >= slot else None
+            net = prompt_wifi_network(slot, existing=exist_slot)
+            if net and net.get("ssid"):
+                wifi_networks.append(net)
+                if len(wifi_networks) == 6:
+                    print(f"\n  {GREEN}{GLYPH_CHECK} Maximum of 6 Wi-Fi networks configured. Moving to next step.{RESET}")
+                    break
+            else:
+                print(f"\n  {DIM}{GLYPH_INFO} Skipped adding fallback network #{slot}.{RESET}")
+        else:
+            break
+
+    # Step 2: Fully Local Mode Option
+    header_text = " [Step 2] Operation Mode "
+    pad_len = BOX_WIDTH - 2 - 1 - len(header_text)
+    print(f"\n{CYAN}{BOX_TL}{BOX_H}{BOLD}{header_text}{RESET}{CYAN}{BOX_H * pad_len}{BOX_TR}{RESET}")
+    print(f"{CYAN}{BOX_V}{RESET}  {BOLD}Local-Only vs. Tailscale Remote Access{RESET}{' ' * (INNER_WIDTH - 40)}{CYAN}{BOX_V}{RESET}")
+    print(f"{CYAN}{BOX_V}{RESET}  {DIM}Fully local mode disables Microlink & Tailscale, saving CPU and RAM.{RESET}{' ' * (INNER_WIDTH - 69)}{CYAN}{BOX_V}{RESET}")
+    print(f"{CYAN}{BOX_V}{RESET}  {DIM}The ESP32 will only be accessed over local Wi-Fi or subnet router.{RESET}{' ' * (INNER_WIDTH - 68)}{CYAN}{BOX_V}{RESET}")
+    print(f"{CYAN}{BOX_BL}{BOX_H * INNER_WIDTH}{BOX_BR}{RESET}")
+
+    print(f"\n  {YELLOW}{GLYPH_PROMPT} Are you trying to setup this ESP fully local (no Tailscale)? [y/N]: {RESET}", end="", flush=True)
+    try:
+        local_ch = read_single_key(allowed_keys=("y", "n"), default="y" if existing_local else "n")
+    except (KeyboardInterrupt, EOFError):
+        print(f"\n\n{RED}{GLYPH_WARN} Setup cancelled by user.{RESET}\n")
+        sys.exit(1)
+
+    fully_local = (local_ch == "y")
     values = {}
-    total = len(FIELDS)
 
-    # Step 1: Collect values sequentially
-    for idx, field in enumerate(FIELDS, start=1):
-        key = field["key"]
+    if fully_local:
+        print(f"\n  {GREEN}{GLYPH_CHECK} Fully local mode selected. Tailscale queries skipped.{RESET}")
+        values["TAILSCALE_KEY"] = ""
+        values["TAILSCALE_HOST"] = ""
+        values["TAILSCALE_API_KEY"] = ""
+        values["TAILSCALE_SUBNET_DEVICE_ID"] = ""
+    else:
+        print(f"\n  {CYAN}{GLYPH_INFO} Tailscale remote networking selected.{RESET}")
+        for idx, field in enumerate(TAILSCALE_FIELDS, start=1):
+            k = field["key"]
+            if k == "TAILSCALE_HOST" and not values.get("TAILSCALE_KEY"):
+                values[k] = ""
+                print(f"\n  {DIM}{GLYPH_INFO} Tailscale network disabled (no auth key). Skipping {field['title']}.{RESET}")
+                continue
+            if k == "TAILSCALE_SUBNET_DEVICE_ID" and not values.get("TAILSCALE_API_KEY"):
+                values[k] = ""
+                print(f"\n  {DIM}{GLYPH_INFO} Subnet router watchdog disabled (no API key). Skipping {field['title']}.{RESET}")
+                continue
+            curr = existing_values.get(k, "")
+            values[k] = prompt_field(field, step_num=idx, total_steps=len(TAILSCALE_FIELDS), current_val=curr if curr else None)
 
-        # If TAILSCALE_KEY was not given, skip TAILSCALE_HOST
-        if key == "TAILSCALE_HOST" and not values.get("TAILSCALE_KEY"):
-            values[key] = ""
-            print(f"\n  {DIM}{GLYPH_INFO} Tailscale network disabled (no auth key). Skipping Step {idx} ({field['title']}).{RESET}")
-            continue
+    # Step 3: OTA Security Password
+    curr_ota = existing_values.get("OTA_KEY", "")
+    values["OTA_KEY"] = prompt_field(OTA_FIELD, step_num=1, total_steps=1, current_val=curr_ota if curr_ota else None)
 
-        # If TAILSCALE_API_KEY was not given, skip TAILSCALE_SUBNET_DEVICE_ID
-        if key == "TAILSCALE_SUBNET_DEVICE_ID" and not values.get("TAILSCALE_API_KEY"):
-            values[key] = ""
-            print(f"\n  {DIM}{GLYPH_INFO} Subnet router watchdog disabled (no API key). Skipping Step {idx} ({field['title']}).{RESET}")
-            continue
-
-        curr = existing_values.get(key, "")
-        values[key] = prompt_field(field, step_num=idx, total_steps=total, current_val=curr if curr else None)
-
-    # Step 2: Review and edit menu
+    # Step 4: Review and Edit Menu
     show_raw = False
     while True:
-        print_summary(values, show_raw=show_raw)
+        print_summary(wifi_networks, values, fully_local=fully_local, show_raw=show_raw)
         print(f"\n{BOLD}Actions:{RESET}")
         print(f"  {GREEN}[Y]{RESET}   Save configuration to {TARGET_FILE.name}")
-        print(f"  {YELLOW}[1-{total}]{RESET} Edit / retype a specific setting")
+        print(f"  {YELLOW}[W]{RESET}   Manage Wi-Fi networks (add / edit / delete)")
+        print(f"  {CYAN}[L]{RESET}   Toggle Operation Mode ({'Switch to Tailscale' if fully_local else 'Switch to Local Only'})")
+        if not fully_local:
+            print(f"  {YELLOW}[T]{RESET}   Edit Tailscale settings")
+        print(f"  {YELLOW}[O]{RESET}   Edit OTA Security Password")
         print(f"  {CYAN}[v]{RESET}   {'Hide raw secret values' if show_raw else 'View raw unmasked values'}")
         print(f"  {RED}[q]{RESET}   Cancel and exit without saving")
 
         print(f"\n{BOLD}{CYAN}{GLYPH_PROMPT} Choice: {RESET}", end="", flush=True)
         try:
-            choice = read_single_key(allowed_keys=("y", "1", "2", "3", "4", "5", "6", "7", "v", "q"), default="y")
+            choice = read_single_key(allowed_keys=("y", "w", "l", "t", "o", "v", "q"), default="y")
         except (KeyboardInterrupt, EOFError):
             print(f"\n\n{RED}{GLYPH_WARN} Cancelled by user.{RESET}\n")
             sys.exit(1)
@@ -724,61 +977,32 @@ def main():
             sys.exit(0)
         elif choice == "v":
             show_raw = not show_raw
-        elif choice in ("1", "2", "3", "4", "5", "6", "7"):
-            target_idx = int(choice)
-            target_field = FIELDS[target_idx - 1]
-            target_key = target_field["key"]
+        elif choice == "w":
+            wifi_networks = manage_wifi_menu(wifi_networks)
+        elif choice == "l":
+            fully_local = not fully_local
+            if fully_local:
+                print(f"\n  {GREEN}{GLYPH_CHECK} Switched to Fully Local mode.{RESET}")
+            else:
+                print(f"\n  {CYAN}{GLYPH_INFO} Switched to Tailscale remote mode.{RESET}")
+                if not values.get("TAILSCALE_KEY"):
+                    for idx, field in enumerate(TAILSCALE_FIELDS, start=1):
+                        k = field["key"]
+                        if k == "TAILSCALE_HOST" and not values.get("TAILSCALE_KEY"):
+                            values[k] = ""
+                            continue
+                        if k == "TAILSCALE_SUBNET_DEVICE_ID" and not values.get("TAILSCALE_API_KEY"):
+                            values[k] = ""
+                            continue
+                        values[k] = prompt_field(field, step_num=idx, total_steps=len(TAILSCALE_FIELDS), current_val=values.get(k))
+        elif choice == "t" and not fully_local:
+            for idx, field in enumerate(TAILSCALE_FIELDS, start=1):
+                k = field["key"]
+                values[k] = prompt_field(field, step_num=idx, total_steps=len(TAILSCALE_FIELDS), current_val=values.get(k))
+        elif choice == "o":
+            values["OTA_KEY"] = prompt_field(OTA_FIELD, step_num=1, total_steps=1, current_val=values.get("OTA_KEY"))
 
-            if target_key == "TAILSCALE_HOST" and not values.get("TAILSCALE_KEY"):
-                print(f"\n  {YELLOW}{GLYPH_WARN} Tailscale Hostname requires a Tailscale Auth Key.{RESET}")
-                print(f"  {DIM}Please configure setting [3] (TAILSCALE_KEY) first.{RESET}\n")
-                continue
-
-            if target_key == "TAILSCALE_SUBNET_DEVICE_ID" and not values.get("TAILSCALE_API_KEY"):
-                print(f"\n  {YELLOW}{GLYPH_WARN} Subnet router watchdog requires a Tailscale API Key.{RESET}")
-                print(f"  {DIM}Please configure setting [5] (TAILSCALE_API_KEY) first.{RESET}\n")
-                continue
-
-            values[target_key] = prompt_field(
-                target_field,
-                step_num=target_idx,
-                total_steps=total,
-                current_val=values.get(target_key),
-            )
-
-            if target_key == "TAILSCALE_KEY":
-                if not values["TAILSCALE_KEY"]:
-                    if values.get("TAILSCALE_HOST"):
-                        values["TAILSCALE_HOST"] = ""
-                        print(f"\n  {DIM}{GLYPH_INFO} TAILSCALE_KEY cleared. Tailscale Hostname has been disabled.{RESET}")
-                else:
-                    if not values.get("TAILSCALE_HOST"):
-                        print(f"\n  {CYAN}{GLYPH_INFO} TAILSCALE_KEY configured. Please specify the Tailscale Hostname.{RESET}")
-                        host_field = FIELDS[3]
-                        values["TAILSCALE_HOST"] = prompt_field(
-                            host_field,
-                            step_num=4,
-                            total_steps=total,
-                            current_val=existing_values.get("TAILSCALE_HOST") or "esp32",
-                        )
-
-            if target_key == "TAILSCALE_API_KEY":
-                if not values["TAILSCALE_API_KEY"]:
-                    if values.get("TAILSCALE_SUBNET_DEVICE_ID"):
-                        values["TAILSCALE_SUBNET_DEVICE_ID"] = ""
-                        print(f"\n  {DIM}{GLYPH_INFO} TAILSCALE_API_KEY cleared. Subnet Device ID has been disabled.{RESET}")
-                else:
-                    if not values.get("TAILSCALE_SUBNET_DEVICE_ID"):
-                        print(f"\n  {CYAN}{GLYPH_INFO} TAILSCALE_API_KEY configured. Please specify the Primary Subnet Device ID.{RESET}")
-                        subnet_field = FIELDS[5]
-                        values["TAILSCALE_SUBNET_DEVICE_ID"] = prompt_field(
-                            subnet_field,
-                            step_num=6,
-                            total_steps=total,
-                            current_val=existing_values.get("TAILSCALE_SUBNET_DEVICE_ID"),
-                        )
-
-    # Step 3: Write file safely
+    # Step 5: Write file safely
     TARGET_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     if TARGET_FILE.exists():
@@ -789,7 +1013,7 @@ def main():
         except Exception as e:
             print(f"\n  {YELLOW}{GLYPH_WARN} Could not create backup: {e}{RESET}")
 
-    content = generate_header_content(values)
+    content = generate_header_content(wifi_networks, values, fully_local=fully_local)
     try:
         with open(TARGET_FILE, "w", encoding="utf-8") as f:
             f.write(content)
@@ -798,6 +1022,8 @@ def main():
         print(f"{GREEN}{BOX_V}{RESET}{BOLD}{GREEN}{'SETUP COMPLETE':^{INNER_WIDTH}}{RESET}{GREEN}{BOX_V}{RESET}")
         print(f"{GREEN}{BOX_BL}{BOX_H * INNER_WIDTH}{BOX_BR}{RESET}")
         print(f"  {GREEN}{GLYPH_CHECK}{RESET} Generated header file : {BOLD}{TARGET_FILE}{RESET}")
+        print(f"  {GREEN}{GLYPH_CHECK}{RESET} Mode                  : {BOLD}{'Fully Local (No Tailscale)' if fully_local else 'Tailscale Enabled'}{RESET}")
+        print(f"  {GREEN}{GLYPH_CHECK}{RESET} Wi-Fi Networks        : {BOLD}{len(wifi_networks)} configured{RESET}")
         print(f"  {GREEN}{GLYPH_CHECK}{RESET} Ready to build project : {BOLD}idf.py build{RESET}\n")
     except Exception as e:
         print(f"\n{RED}{GLYPH_WARN} Error writing to {TARGET_FILE}: {e}{RESET}\n")
@@ -806,3 +1032,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

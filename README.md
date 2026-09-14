@@ -3,7 +3,7 @@
 Transform an **ESP32** into an encrypted smart switch actuator that physically pushes buttons (power switches, lights, appliances, or PC power buttons) on command. Control it locally over your home Wi-Fi or remotely from anywhere in the world via **Tailscale VPN**.
 
 The device features two clean, zero-software interfaces:
-* **Web Dashboard:** Open in any web browser on your phone, tablet, or PC.
+* **Web Dashboard:** Open in any web browser on your phone, tablet, PC, or any device with a web browser (oh yes, even a refridgerator lol!)
 * **Terminal Dashboard:** Open directly in any terminal using a standard `curl` command.
 
 ---
@@ -25,7 +25,7 @@ The device features two clean, zero-software interfaces:
 * **Microcontroller:**
   * **Tested Board:** ESP32-S3 (DOIT N16R8 with 16 MB Flash, 8 MB Octal PSRAM).
   * **Compatible Boards:** ESP32-S3 (all variants), ESP32 (Classic), ESP32-C3, and ESP32-S2.
-  * **Minimum Requirement:** Any ESP32 development board with at least 4 MB Flash (8 MB or 16 MB recommended for dual-slot wireless OTA updates). *(For board-specific feature differences, see `documentation.md`).*
+  * **Minimum Requirement:** Any ESP32 development board with at least 4 MB Flash (8 MB or 16 MB recommended). *(For board-specific feature differences, see `documentation.md`).*
 * **Actuator:** Standard 3.3V–5V micro servo (e.g., TowerPro SG90, MG90S).
 * **Power Supply:** Standard 5V USB-C power supply or phone charger.
 * **USB Cable:** A data-capable USB cable for the initial flash.
@@ -82,11 +82,10 @@ python setup_secrets.py
 ```
 
 The tool will prompt you for:
-1. **Wi-Fi SSID & Password:** Your home 2.4 GHz Wi-Fi credentials.
-2. **Tailscale Auth Key (Optional):** Pre-authenticated key from your Tailscale Admin Console. *(Leave empty if you only want to use local Wi-Fi).*
-3. **Tailscale Device Name:** Name for your device on your Tailnet (default: `esp32`).
-4. **Tailscale API Token & Primary Subnet Router (Optional):** Used for automated failover monitoring. *(Leave empty if you don't use this).*
-5. **OTA Security Key:** A password or PIN to authorize future wireless updates. *(Leave empty to allow one-click updates without a password).*
+1. **Wi-Fi Networks (1 Primary + Up to 5 Fallback Networks):** Your primary Wi-Fi credentials, with the option to configure up to 5 additional fallback networks (e.g. backup router) that the ESP32 automatically cycles between if a connection drops.
+2. **Operation Mode (Fully Local vs. Tailscale):** Choose between running fully local (completely bypassing Microlink and Tailscale to minimize CPU and RAM usage) or enabling Tailscale mesh VPN for global remote access.
+3. **Tailscale Configuration (if remote mode selected):** Auth key, hostname, and optional subnet watchdog credentials.
+4. **OTA Security Key:** A password or PIN to authorize future wireless updates. *(Leave empty to allow one-click updates without a password).*
 
 ---
 
@@ -126,28 +125,50 @@ idf.py -p COM3 flash monitor
 
 ---
 
-## Initial Servo Calibration
+## Initial Servo Setup & Horn Attachment
 
-On its very first boot, the ESP32 starts in a safe uncalibrated state so the servo arm will not move unexpectedly.
+> [!IMPORTANT]
+> **Do not attach or screw down the servo horn before powering on the ESP32!**
+> Standard micro-servos (like the SG90 or MG90S) physically only sweep within a ~180° arc. Attaching the horn after zeroing ensures full mechanical travel in the desired direction.
+
+### Step 1: Center the Servo Motor (90°)
+1. Power on the ESP32 and open the calibration tool (via Web Browser at `http://192.168.1.50/` or terminal via `curl -s http://192.168.1.50/calibrate | bash`).
+2. The initial default resting position is automatically set to **`90°`** (exact mechanical center).
+3. When the calibration interface opens, the servo motor shaft rotates to its baseline **`90°`** center position.
+
+### Step 2: Press Horn onto Splines (at 90°)
+1. While the motor is held at its **`90°`** center position, take the servo horn (arm) and gently press it onto the splined gear shaft with your fingers pointing straight out towards your switch/button (roughly perpendicular to the servo casing).
+2. The teeth (splines) will lock the horn at that exact angle, providing full travel flexibility in either direction across the 0° – 180° sweep.
+
+### Step 3: Power Off & Tighten Screw
+1. **Unplug or power off the ESP32** before tightening the screw.
+2. **Hold the plastic horn firmly with your thumb and fingers** while tightening the center screw with your screwdriver. Holding the horn directly absorbs all screwdriver torque and prevents stripping or forcing the delicate internal gears.
+3. Power the ESP32 back on.
+
+---
+
+## Servo Calibration
+
+Once the horn is securely fastened at 90°, fine-tune your angles using either the Web Browser or the Terminal:
 
 ### Option A: Web Browser Calibration
 
-1. Open your browser and go to `http://192.168.1.50/` or `http://esp32.local/`.
-2. **Rest Angle:** Rotate the top dial to set where the arm rests when idle (hovering just above the button). The arm moves live as you adjust the dial.
-3. **Press Angle:** Rotate the second dial to set how far the arm pushes down on the button.
-4. **Press Duration:** Set how many milliseconds the arm holds the button down before releasing.
-5. **Test Button:** Tap the test button to run a test press and confirm proper physical button actuation.
-6. Tap **Save Calibration**. Your settings are saved and the device is ready to use.
+1. Open your browser and go to `http://192.168.1.50/` or `http://esp32.local/` (or click **Servo Calibration** from the home screen).
+2. **Rest Angle:** Adjust the dial (or tap the center number to type directly) so the horn hovers 1–2 mm just above the button without pressing it (idle state).
+3. **Press Angle:** Adjust the second dial (or tap the center number to type) so the horn pushes down firmly on the switch/button. Make sure that the horn isn’t pushing down too hard causing the servo to buzz.
+4. **Press Duration:** Set how many milliseconds (e.g. 200–400ms) the arm holds the button down before releasing.
+5. **Test Tap:** Tap **Test Tap** to verify physical button actuation.
+6. Tap **Save Calibration** to store your settings permanently to NVS flash.
 
 ### Option B: Terminal Calibration (`curl`)
 
-You can also calibrate directly from your terminal:
+You can also calibrate directly from any terminal:
 
 ```bash
 bash <(curl -s http://192.168.1.50/calibrate)
 ```
 
-Follow the on-screen steps to test angles live and save them.
+Follow the on-screen prompts to adjust angles live, test actuation, and save.
 
 ---
 
@@ -156,8 +177,8 @@ Follow the on-screen steps to test angles live and save them.
 ### Browser Access
 
 Navigate to any of these addresses in your browser:
-* **Local Network:** `http://192.168.1.50/` or `http://esp32.local/`
-* **Tailscale (Worldwide):** `http://esp32/`
+* **Local Network:** `http://192.168.1.50/main` or `http://esp32.local/main`
+* **Tailscale (Worldwide):** `http://esp32/main`
 
 ### Terminal Access (`curl`)
 
@@ -193,7 +214,7 @@ Wirelessly update the ESP32 with new firmware versions or updated Wi-Fi/network 
 2. The update window opens for **10 minutes**.
 3. Upload new firmware wirelessly:
    ```bash
-   python3 ~/.platformio/packages/framework-arduinoespressif32/tools/espota.py -i 192.168.1.50 -p 3232 -f build/ESP32-SwitchBot.bin
+   python3 components/arduino/tools/espota.py -i 192.168.1.50 -p 3232 -f build/ESP32-SwitchBot.bin
    ```
 4. When finished, or after 10 minutes, the OTA port automatically locks itself again.
 
@@ -208,3 +229,7 @@ For detailed technical documentation on how the system works under the hood, see
 ## License
 
 This project is licensed under the [Apache 2.0 License](LICENSE).
+
+---
+
+**Current Version:** `v1.2`
