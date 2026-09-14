@@ -5,9 +5,9 @@
 #include <Preferences.h>
 #include "web_pages.h"
 
-// Default servo calibration metrics as requested: rest: 0, press: 10, duration: 200
-static const int DEFAULT_REST_ANGLE = 0;
-static const int DEFAULT_PRESS_ANGLE = 10;
+// Default servo calibration metrics as requested: rest: 90 (center), press: 100, duration: 200
+static const int DEFAULT_REST_ANGLE = 90;
+static const int DEFAULT_PRESS_ANGLE = 100;
 static const int DEFAULT_PRESS_DURATION_MS = 200;
 
 // Shared global state (defined in main.cpp)
@@ -17,31 +17,42 @@ extern int restAngle;
 extern int pressAngle;
 extern int pressDurationMs;
 extern bool isCalibrated;
-extern Preferences prefs;
+extern volatile bool pendingTestTap;
+extern int testRestAngle;
+extern int testPressAngle;
+extern int testDurationMs;
+extern volatile bool isHoldActive;
+extern unsigned long holdStartTimeMs;
+extern TaskHandle_t loopTaskHandle;
 
 /**
  * @brief Load calibration data from NVS namespace "servo_cal"
  */
 inline void loadCalibration() {
-  prefs.begin("servo_cal", true);
-  isCalibrated = prefs.getBool("calibrated", false);
+  Preferences p;
+  p.begin("servo_cal", true);
+  isCalibrated = p.getBool("calibrated", false);
   if (isCalibrated) {
-    restAngle = prefs.getInt("rest_angle", DEFAULT_REST_ANGLE);
-    pressAngle = prefs.getInt("press_angle", DEFAULT_PRESS_ANGLE);
-    pressDurationMs = prefs.getInt("press_dur", DEFAULT_PRESS_DURATION_MS);
+    restAngle = p.getInt("rest_angle", DEFAULT_REST_ANGLE);
+    pressAngle = p.getInt("press_angle", DEFAULT_PRESS_ANGLE);
+    pressDurationMs = p.getInt("press_dur", DEFAULT_PRESS_DURATION_MS);
+    if (restAngle < 0 || restAngle > 180 || pressAngle < 0 || pressAngle > 180) {
+      restAngle = DEFAULT_REST_ANGLE;
+      pressAngle = DEFAULT_PRESS_ANGLE;
+    }
   } else {
     restAngle = DEFAULT_REST_ANGLE;
     pressAngle = DEFAULT_PRESS_ANGLE;
     pressDurationMs = DEFAULT_PRESS_DURATION_MS;
   }
-  prefs.end();
+  p.end();
 }
 
 /**
  * @brief Save calibration metrics to NVS and mark device calibrated
  */
 inline bool saveCalibration(int rest, int press, int dur) {
-  if (rest < -180 || rest > 180 || press < -180 || press > 180 || dur < 50 || dur > 5000) {
+  if (rest < 0 || rest > 180 || press < 0 || press > 180 || dur < 50 || dur > 5000) {
     return false;
   }
   restAngle = rest;
@@ -49,17 +60,19 @@ inline bool saveCalibration(int rest, int press, int dur) {
   pressDurationMs = dur;
   isCalibrated = true;
 
-  prefs.begin("servo_cal", false);
-  prefs.putBool("calibrated", true);
-  prefs.putInt("rest_angle", restAngle);
-  prefs.putInt("press_angle", pressAngle);
-  prefs.putInt("press_dur", pressDurationMs);
-  prefs.end();
+  Preferences p;
+  p.begin("servo_cal", false);
+  p.putBool("calibrated", true);
+  p.putInt("rest_angle", restAngle);
+  p.putInt("press_angle", pressAngle);
+  p.putInt("press_dur", pressDurationMs);
+  p.end();
 
   // Ensure servo rests at the new rest angle
   myservo.attach(servoPin, 500, 2400);
   myservo.write(restAngle);
-  delay(300);
+  int travelDelay = max(60, abs(pressAngle - restAngle) * 3);
+  delay(travelDelay);
   myservo.detach();
 
   return true;
@@ -69,9 +82,10 @@ inline bool saveCalibration(int rest, int press, int dur) {
  * @brief Reset calibration data in NVS and restore initial uncalibrated defaults
  */
 inline void resetCalibration() {
-  prefs.begin("servo_cal", false);
-  prefs.clear();
-  prefs.end();
+  Preferences p;
+  p.begin("servo_cal", false);
+  p.clear();
+  p.end();
 
   isCalibrated = false;
   restAngle = DEFAULT_REST_ANGLE;
@@ -80,7 +94,7 @@ inline void resetCalibration() {
 
   myservo.attach(servoPin, 500, 2400);
   myservo.write(restAngle);
-  delay(300);
+  delay(150);
   myservo.detach();
 }
 
@@ -95,8 +109,8 @@ CUR_CAL=$(echo "$LIVE" | grep -o '"cal":[01]' | cut -d: -f2)
 CUR_REST=$(echo "$LIVE" | grep -o '"s_rest":[-0-9]*' | cut -d: -f2)
 CUR_PRESS=$(echo "$LIVE" | grep -o '"s_press":[-0-9]*' | cut -d: -f2)
 CUR_DUR=$(echo "$LIVE" | grep -o '"s_dur":[0-9]*' | cut -d: -f2)
-if [[ -z "$CUR_REST" ]]; then CUR_REST=0; fi
-if [[ -z "$CUR_PRESS" ]]; then CUR_PRESS=10; fi
+if [[ -z "$CUR_REST" ]]; then CUR_REST=90; fi
+if [[ -z "$CUR_PRESS" ]]; then CUR_PRESS=100; fi
 if [[ -z "$CUR_DUR" ]]; then CUR_DUR=200; fi
 ORIG_REST=$CUR_REST
 REST=$CUR_REST
@@ -151,7 +165,7 @@ while true; do
   echo ''
   while true; do
     echo '[ Step 1/3: Rest Angle ] (Hovering just above button)'
-    read -p "Enter rest angle (-180 to 180, 'r' to reset, 'q' to cancel) [$REST]: " input </dev/tty
+    read -p "Enter rest angle (0 to 180, 'r' to reset, 'q' to cancel) [$REST]: " input </dev/tty
     if [[ "$input" == "r" || "$input" == "R" ]]; then
       rconf=""
       read -n 1 -s -p 'Are you sure you want to clear calibration data? [y/N]: ' rconf </dev/tty
@@ -171,10 +185,10 @@ while true; do
       exit 0
     fi
     if [[ -n "$input" ]]; then
-      if [[ "$input" =~ ^-?[0-9]+$ ]] && [ "$input" -ge -180 ] && [ "$input" -le 180 ]; then
+      if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 0 ] && [ "$input" -le 180 ]; then
         REST=$input
       else
-        echo '[!] Invalid angle. Enter a number between -180 and 180.'
+        echo '[!] Invalid angle. Enter a number between 0 and 180.'
         continue
       fi
     fi
@@ -194,7 +208,7 @@ while true; do
   echo ''
   while true; do
     echo '[ Step 2/3: Press Angle ] (Pushing button fully, not buzzing)'
-    read -p "Enter press angle (-180 to 180, 'q' to cancel) [$PRESS]: " input </dev/tty
+    read -p "Enter press angle (0 to 180, 'q' to cancel) [$PRESS]: " input </dev/tty
     if [[ "$input" == "q" || "$input" == "Q" ]]; then
       echo '[*] Cancelling calibration... returning servo to saved rest position.'
       curl -s -X POST "http://$HOST/api/calibrate/move?angle=$ORIG_REST" >/dev/null
@@ -202,15 +216,18 @@ while true; do
       exit 0
     fi
     if [[ -n "$input" ]]; then
-      if [[ "$input" =~ ^-?[0-9]+$ ]] && [ "$input" -ge -180 ] && [ "$input" -le 180 ]; then
+      if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 0 ] && [ "$input" -le 180 ]; then
         PRESS=$input
       else
-        echo '[!] Invalid angle. Enter a number between -180 and 180.'
+        echo '[!] Invalid angle. Enter a number between 0 and 180.'
         continue
       fi
     fi
+    echo "[*] Previewing press stroke to ${PRESS}°..."
     curl -s -X POST "http://$HOST/api/calibrate/move?angle=$PRESS" >/dev/null
-    echo "[+] Servo driven to ${PRESS}°."
+    sleep 0.35
+    curl -s -X POST "http://$HOST/api/calibrate/move?angle=$REST" >/dev/null
+    echo "[+] Servo stroke completed."
     conf=""
     read -n 1 -s -p "Confirm press angle (${PRESS}°)? [y: next / n: retry / q: cancel]: " conf </dev/tty
     echo ''
@@ -221,7 +238,6 @@ while true; do
       exit 0
     fi
     if [[ "$conf" == "y" || "$conf" == "Y" ]]; then
-      curl -s -X POST "http://$HOST/api/calibrate/move?angle=$REST" >/dev/null
       break
     fi
   done
@@ -299,16 +315,16 @@ while true; do
       read -n 1 -s -p 'Select metric: ' vopt </dev/tty
       echo ''
       if [[ "$vopt" == "1" ]]; then
-        read -p "Enter new Rest Angle (-180 to 180) [$REST]: " nval </dev/tty
-        if [[ "$nval" =~ ^-?[0-9]+$ ]] && [ "$nval" -ge -180 ] && [ "$nval" -le 180 ]; then
+        read -p "Enter new Rest Angle (0 to 180) [$REST]: " nval </dev/tty
+        if [[ "$nval" =~ ^[0-9]+$ ]] && [ "$nval" -ge 0 ] && [ "$nval" -le 180 ]; then
           REST=$nval
           curl -s -X POST "http://$HOST/api/calibrate/move?angle=$REST" >/dev/null
           echo "[+] Servo moved to ${REST}°."
           sleep 1
         fi
       elif [[ "$vopt" == "2" ]]; then
-        read -p "Enter new Press Angle (-180 to 180) [$PRESS]: " nval </dev/tty
-        if [[ "$nval" =~ ^-?[0-9]+$ ]] && [ "$nval" -ge -180 ] && [ "$nval" -le 180 ]; then
+        read -p "Enter new Press Angle (0 to 180) [$PRESS]: " nval </dev/tty
+        if [[ "$nval" =~ ^[0-9]+$ ]] && [ "$nval" -ge 0 ] && [ "$nval" -le 180 ]; then
           PRESS=$nval
           curl -s -X POST "http://$HOST/api/calibrate/move?angle=$PRESS" >/dev/null
           echo "[+] Servo moved to ${PRESS}°."
@@ -384,10 +400,10 @@ inline void sendCalibratePage(WebServer &server, int curRest, int curPress, int 
           ".dial-bg{fill:none;stroke:rgba(255,255,255,0.08);stroke-width:8;stroke-linecap:round;}"
           ".dial-bar{fill:none;stroke:var(--primary);stroke-width:8;stroke-linecap:round;filter:drop-shadow(0 0 6px rgba(138,180,248,0.35));}"
           ".dial-thumb{fill:#ffffff;stroke:var(--primary);stroke-width:3.5;filter:drop-shadow(0 0 5px rgba(138,180,248,0.6));transition:transform .1s ease;}"
-          ".dial-center{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;pointer-events:auto;}"
-          ".dial-badge{display:inline-flex;align-items:center;justify-content:center;background:var(--surface-c);border:1px solid var(--surface-border);border-radius:12px;padding:4px 10px;min-width:64px;box-shadow:inset 0 1px 3px rgba(0,0,0,0.35);transition:border-color .2s,box-shadow .2s;cursor:text;}"
+          ".dial-center{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;pointer-events:auto;z-index:10;touch-action:auto;}"
+          ".dial-badge{display:inline-flex;align-items:center;justify-content:center;background:var(--surface-c);border:1px solid var(--surface-border);border-radius:12px;padding:4px 10px;min-width:64px;box-shadow:inset 0 1px 3px rgba(0,0,0,0.35);transition:border-color .2s,box-shadow .2s;cursor:text;pointer-events:auto;touch-action:auto;user-select:text;-webkit-user-select:text;}"
           ".dial-badge:focus-within{border-color:var(--primary);box-shadow:0 0 10px rgba(138,180,248,0.25);}"
-          ".cal-dial-input{background:transparent !important;border:none !important;color:var(--primary);font-family:'SF Mono',Menlo,Consolas,monospace;font-size:17px;font-weight:700;padding:0 !important;margin:0 !important;text-align:center !important;min-width:1.2ch;max-width:5ch;field-sizing:content;outline:none;-webkit-appearance:none;-moz-appearance:textfield;appearance:none;line-height:1.2;}"
+          ".cal-dial-input{background:transparent !important;border:none !important;color:var(--primary);font-family:'SF Mono',Menlo,Consolas,monospace;font-size:17px;font-weight:700;padding:0 !important;margin:0 !important;text-align:center !important;min-width:1.2ch;max-width:5ch;field-sizing:content;outline:none;-webkit-appearance:none;-moz-appearance:textfield;appearance:none;line-height:1.2;cursor:text;user-select:text;-webkit-user-select:text;pointer-events:auto;touch-action:auto;}"
           ".cal-dial-input::-webkit-inner-spin-button,.cal-dial-input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}"
           ".dial-deg{font-size:13px;font-weight:700;color:var(--primary);opacity:0.85;margin-left:1px;line-height:1.2;user-select:none;-webkit-user-select:none;}"
           ".dial-limits{position:absolute;bottom:2px;left:0;right:0;display:flex;justify-content:space-between;padding:0 10px;font-size:9.5px;color:var(--on-surface-v);pointer-events:none;font-family:'SF Mono',Menlo,monospace;}"
@@ -428,11 +444,11 @@ inline void sendCalibratePage(WebServer &server, int curRest, int curPress, int 
   body += "</svg>";
   body += "<div class='dial-center'>";
   body += "<div class='dial-badge'>";
-  body += "<input type='text' inputmode='numeric' pattern='-?[0-9]*' id='rest-num' value='" + String(curRest) + "' class='cal-dial-input' style='width:" + String(String(curRest).length() + 0.2) + "ch;'>";
+  body += "<input type='text' inputmode='numeric' pattern='[0-9]*' id='rest-num' value='" + String(curRest) + "' class='cal-dial-input' style='width:3.2ch;text-align:center;font-variant-numeric:tabular-nums;'>";
   body += "<span class='dial-deg'>&deg;</span>";
   body += "</div></div>";
   body += "<div class='dial-limits'>";
-  body += "<span>-180&deg;</span><span>+180&deg;</span>";
+  body += "<span>0&deg;</span><span>180&deg;</span>";
   body += "</div></div></div>";
 
   // Press Angle Dial
@@ -447,11 +463,11 @@ inline void sendCalibratePage(WebServer &server, int curRest, int curPress, int 
   body += "</svg>";
   body += "<div class='dial-center'>";
   body += "<div class='dial-badge'>";
-  body += "<input type='text' inputmode='numeric' pattern='-?[0-9]*' id='press-num' value='" + String(curPress) + "' class='cal-dial-input' style='width:" + String(String(curPress).length() + 0.2) + "ch;'>";
+  body += "<input type='text' inputmode='numeric' pattern='[0-9]*' id='press-num' value='" + String(curPress) + "' class='cal-dial-input' style='width:3.2ch;text-align:center;font-variant-numeric:tabular-nums;'>";
   body += "<span class='dial-deg'>&deg;</span>";
   body += "</div></div>";
   body += "<div class='dial-limits'>";
-  body += "<span>-180&deg;</span><span>+180&deg;</span>";
+  body += "<span>0&deg;</span><span>180&deg;</span>";
   body += "</div></div></div>";
 
   body += "</div>"; // End dial-grid
@@ -550,18 +566,19 @@ inline void sendCalibratePage(WebServer &server, int curRest, int curPress, int 
         "var thumb=document.getElementById(type+'-dial-thumb');"
         "var num=document.getElementById(type+'-num');"
         "if(!bar||!thumb||!num)return;"
-        "if(angle>180)angle=180;if(angle<-180)angle=-180;"
+        "if(angle>180)angle=180;if(angle<0)angle=0;"
         "num.value=angle;"
-        "num.style.width=(((''+angle).length+0.2)+'ch');"
-        "var phi=(angle/180)*160;"
+        "var phi=((angle-90)/90)*160;"
         "var rad=phi*(Math.PI/180);"
         "var x=(80+58*Math.sin(rad)).toFixed(2);"
         "var y=(80-58*Math.cos(rad)).toFixed(2);"
         "thumb.setAttribute('cx',x);"
         "thumb.setAttribute('cy',y);"
-        "if(Math.abs(angle)<0.5){bar.setAttribute('d','');}"
-        "else if(angle>0){bar.setAttribute('d','M 80 22 A 58 58 0 0 1 '+x+' '+y);}"
-        "else{bar.setAttribute('d','M 80 22 A 58 58 0 0 0 '+x+' '+y);}"
+        "if(angle<=0){bar.setAttribute('d','');}"
+        "else{"
+          "var largeArc=(angle>101)?1:0;"
+          "bar.setAttribute('d','M 60.16 134.50 A 58 58 0 '+largeArc+' 1 '+x+' '+y);"
+        "}"
       "}"
 
       // Circular Dial Controller with Bottom Gap Barrier
@@ -570,7 +587,7 @@ inline void sendCalibratePage(WebServer &server, int curRest, int curPress, int 
         "var num=document.getElementById(type+'-num');"
         "if(!wrap||!num)return;"
         "var dragging=false;"
-        "var curAng=parseInt(num.value,10)||0;"
+        "var curAng=parseInt(num.value,10);if(isNaN(curAng))curAng=90;"
         "var lastHaptic=curAng;"
 
         "function getAngle(e){"
@@ -586,22 +603,23 @@ inline void sendCalibratePage(WebServer &server, int curRest, int curPress, int 
           "var deg=Math.atan2(dx,-dy)*(180/Math.PI);"
 
           // Barrier Protection:
-          // Prevent crossing the bottom gap from negative into positive
-          "if(curAng<-80&&deg>80){return -180;}"
-          // Prevent crossing the bottom gap from positive into negative
-          "if(curAng>80&&deg<-80){return 180;}"
+          // Prevent crossing the bottom gap from 0 deg into 180 deg
+          "if(curAng<45&&deg>100){return 0;}"
+          // Prevent crossing the bottom gap from 180 deg into 0 deg
+          "if(curAng>135&&deg<-100){return 180;}"
 
           // Gap clamping (bottom 40 deg gap: |deg| > 160)
-          "if(Math.abs(deg)>160){return deg>0?180:-180;}"
+          "if(Math.abs(deg)>160){return deg<0?0:180;}"
 
-          "var ang=Math.round((deg/160)*180);"
-          "if(ang>180)ang=180;if(ang<-180)ang=-180;"
+          "var ang=Math.round(90+(deg/160)*90);"
+          "if(ang>180)ang=180;if(ang<0)ang=0;"
           "return ang;"
         "}"
 
         "function onDown(e){"
+          "if(e.target&&e.target.closest&&e.target.closest('.dial-center'))return;"
           "e.preventDefault();dragging=true;"
-          "curAng=parseInt(num.value,10)||0;"
+          "curAng=parseInt(num.value,10);if(isNaN(curAng))curAng=90;"
           "var a=getAngle(e);"
           "curAng=a;"
           "setDial(type,a);"
@@ -624,11 +642,24 @@ inline void sendCalibratePage(WebServer &server, int curRest, int curPress, int 
         "window.addEventListener('pointerup',onUp);"
         "window.addEventListener('pointercancel',onUp);"
 
+        "var ctr=wrap.querySelector('.dial-center');"
+        "if(ctr){"
+          "ctr.addEventListener('pointerdown',function(e){e.stopPropagation();});"
+          "ctr.addEventListener('mousedown',function(e){e.stopPropagation();});"
+          "ctr.addEventListener('touchstart',function(e){e.stopPropagation();},{passive:true});"
+        "}"
+
+        "num.addEventListener('focus',function(){this.select();});"
+        "var b=num.parentElement;"
+        "if(b){"
+          "b.addEventListener('pointerdown',function(e){e.stopPropagation();});"
+          "b.addEventListener('click',function(e){num.focus();num.select();});"
+        "}"
+
         "num.addEventListener('input',function(){"
-          "this.style.width=((this.value.length+0.2)+'ch');"
           "var v=parseInt(this.value,10);"
           "if(!isNaN(v)){"
-            "if(v>180)v=180;if(v<-180)v=-180;"
+            "if(v>180)v=180;if(v<0)v=0;"
             "curAng=v;"
             "setDial(type,v);"
             "if(isRest)moveLive(v);"
@@ -637,12 +668,10 @@ inline void sendCalibratePage(WebServer &server, int curRest, int curPress, int 
         "});"
         "num.addEventListener('change',function(){"
           "var v=parseInt(this.value,10);"
-          "if(isNaN(v))v=0;if(v>180)v=180;if(v<-180)v=-180;"
-          "this.value=v;this.style.width=(((''+v).length+0.2)+'ch');curAng=v;setDial(type,v);"
+          "if(isNaN(v))v=90;if(v>180)v=180;if(v<0)v=0;"
+          "this.value=v;curAng=v;setDial(type,v);"
           "if(isRest)moveLive(v);"
         "});"
-        "var b=num.parentElement;"
-        "if(b){b.addEventListener('click',function(e){if(e.target!==num)num.focus();});}"
       "}"
 
       // Initialize dials
@@ -655,8 +684,8 @@ inline void sendCalibratePage(WebServer &server, int curRest, int curPress, int 
       "var revAnim=null;"
       "function animateRevert(){"
         "if(revAnim)cancelAnimationFrame(revAnim);"
-        "var sRest=parseInt(rNum.value,10)||0;"
-        "var sPress=parseInt(pNum.value,10)||0;"
+        "var sRest=parseInt(rNum.value,10);if(isNaN(sRest))sRest=90;"
+        "var sPress=parseInt(pNum.value,10);if(isNaN(sPress))sPress=100;"
         "var sDur=parseInt(dRng.value,10)||savedDur;"
         "var dRest=savedRest-sRest;"
         "var dPress=savedPress-sPress;"
@@ -714,6 +743,7 @@ inline void sendCalibratePage(WebServer &server, int curRest, int curPress, int 
           "updateSliderFill(v);"
         "}"
       "});"
+      "dNum.addEventListener('focus',function(){this.select();});"
       "dNum.addEventListener('change',function(){"
         "var v=parseInt(this.value,10);"
         "if(isNaN(v)||v<50)v=50;if(v>3000)v=3000;"
@@ -830,10 +860,10 @@ inline void registerCalibrationRoutes(WebServer &server) {
   // POST /api/calibrate/move?angle=X
   server.on("/api/calibrate/move", HTTP_POST, [&server]() {
     int angle = server.hasArg("angle") ? server.arg("angle").toInt() : restAngle;
-    if (angle >= -180 && angle <= 180) {
+    if (angle >= 0 && angle <= 180) {
       myservo.attach(servoPin, 500, 2400);
       myservo.write(angle);
-      delay(200);
+      delay(80);
       myservo.detach();
       server.sendHeader("Connection", "close");
       server.send(200, "text/plain", "Moved");
@@ -848,15 +878,21 @@ inline void registerCalibrationRoutes(WebServer &server) {
     int state = server.hasArg("state") ? server.arg("state").toInt() : 0;
     int p = server.hasArg("press") ? server.arg("press").toInt() : pressAngle;
     int r = server.hasArg("rest") ? server.arg("rest").toInt() : restAngle;
+    p = constrain(p, 0, 180);
+    r = constrain(r, 0, 180);
 
     if (state == 1) {
+      isHoldActive = true;
+      holdStartTimeMs = millis();
       myservo.attach(servoPin, 500, 2400);
       myservo.write(p);
       server.sendHeader("Connection", "close");
       server.send(200, "text/plain", "Holding");
     } else {
+      isHoldActive = false;
       myservo.write(r);
-      delay(300);
+      int travelDelay = max(60, abs(p - r) * 3);
+      delay(travelDelay);
       myservo.detach();
       server.sendHeader("Connection", "close");
       server.send(200, "text/plain", "Released");
@@ -868,16 +904,20 @@ inline void registerCalibrationRoutes(WebServer &server) {
     int r = server.hasArg("rest") ? server.arg("rest").toInt() : restAngle;
     int p = server.hasArg("press") ? server.arg("press").toInt() : pressAngle;
     int d = server.hasArg("dur") ? server.arg("dur").toInt() : (server.hasArg("duration") ? server.arg("duration").toInt() : pressDurationMs);
+    r = constrain(r, 0, 180);
+    p = constrain(p, 0, 180);
+    d = constrain(d, 50, 5000);
 
-    myservo.attach(servoPin, 500, 2400);
-    myservo.write(p);
-    delay(d);
-    myservo.write(r);
-    delay(300);
-    myservo.detach();
+    testRestAngle = r;
+    testPressAngle = p;
+    testDurationMs = d;
+    pendingTestTap = true;
+    if (loopTaskHandle != nullptr) {
+      xTaskNotifyGive(loopTaskHandle);
+    }
 
     server.sendHeader("Connection", "close");
-    server.send(200, "text/plain", "Tap completed");
+    server.send(200, "text/plain", "Tap queued");
   });
 
   // POST /api/calibrate/save?rest=X&press=Y&dur=Z

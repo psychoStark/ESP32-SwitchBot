@@ -30,18 +30,100 @@ extern "C" {
   #include "lwip/dns.h"
   #include "esp_pm.h"
   #include "esp_wifi.h"
+  #include "esp_netif.h"
+  #include "esp_netif_net_stack.h"
+  #include "lwip/etharp.h"
+  #include "lwip/netif.h"
 }
 
-// --- Configuration ---
-const char* ssid     = WIFI_SSID;
-const char* password = WIFI_PASSWORD;
+// ==============================================================================
+// User-Configurable Network & System Settings
+// ==============================================================================
 
-// Change this static IP and gateway to match your home router's subnet if needed
+// Operation Mode: Set to true if running strictly on local LAN / subnet router (skips Tailscale & Microlink completely)
+#if defined(FULLY_LOCAL_MODE)
+const bool isLocalOnly = (FULLY_LOCAL_MODE != 0);
+#else
+const bool isLocalOnly = (strlen(TAILSCALE_KEY) == 0);
+#endif
+
+// Set your preferred timezone offset (e.g. "0530", "+05:30", "+0630", "-05:00", "-0500", "0")
+const char* TIMEZONE_OFFSET = "+05:30";
+
+// Hardware Model Name (Optional Manual Override)
+// Leave empty ("") to let firmware automatically detect your ESP32 chip model, flash, and PSRAM (e.g. "ESP32-S3-N16R8").
+// If you want to change it or if detection is wrong, specify your custom board name here (e.g. "ESP32-S3 DOIT"):
+#define BOARD_NAME ""
+
+
+// Wi-Fi Credentials & Failover Configuration (Up to 6 networks: #1 is main, falls back to 2, 3.. 6)
+struct WifiNetworkConfig {
+  const char* ssid;
+  const char* password;
+};
+
+#if defined(WIFI_SSID_1)
+  #define _CFG_SSID_1 WIFI_SSID_1
+  #define _CFG_PASS_1 WIFI_PASSWORD_1
+#elif defined(WIFI_SSID)
+  #define _CFG_SSID_1 WIFI_SSID
+  #define _CFG_PASS_1 WIFI_PASSWORD
+#else
+  #define _CFG_SSID_1 ""
+  #define _CFG_PASS_1 ""
+#endif
+
+#ifndef WIFI_SSID_2
+  #define WIFI_SSID_2 ""
+  #define WIFI_PASSWORD_2 ""
+#endif
+#ifndef WIFI_SSID_3
+  #define WIFI_SSID_3 ""
+  #define WIFI_PASSWORD_3 ""
+#endif
+#ifndef WIFI_SSID_4
+  #define WIFI_SSID_4 ""
+  #define WIFI_PASSWORD_4 ""
+#endif
+#ifndef WIFI_SSID_5
+  #define WIFI_SSID_5 ""
+  #define WIFI_PASSWORD_5 ""
+#endif
+#ifndef WIFI_SSID_6
+  #define WIFI_SSID_6 ""
+  #define WIFI_PASSWORD_6 ""
+#endif
+
+const WifiNetworkConfig configuredWifiNetworks[] = {
+  { _CFG_SSID_1, _CFG_PASS_1 },
+  { WIFI_SSID_2, WIFI_PASSWORD_2 },
+  { WIFI_SSID_3, WIFI_PASSWORD_3 },
+  { WIFI_SSID_4, WIFI_PASSWORD_4 },
+  { WIFI_SSID_5, WIFI_PASSWORD_5 },
+  { WIFI_SSID_6, WIFI_PASSWORD_6 }
+};
+const size_t TOTAL_WIFI_SLOTS = sizeof(configuredWifiNetworks) / sizeof(configuredWifiNetworks[0]);
+int activeWifiCount = 0;
+int currentWifiIndex = 0;
+
+// Backward-compatible alias for primary network
+const char* ssid     = _CFG_SSID_1;
+const char* password = _CFG_PASS_1;
+
+// Wi-Fi Static IP & Subnet Settings (defaults for standard 192.168.1.x home networks)
 IPAddress local_IP(192, 168, 1, 50);
 IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 IPAddress primaryDNS(1, 1, 1, 1);
 IPAddress secondaryDNS(8, 8, 8, 8);
+IPAddress routerDNS(192, 168, 1, 1);
+
+// Tailscale subnet route advertised by this device
+const char* tailscaleAdvertiseRoute = "192.168.1.0/24";
+
+// Controls whether web dashboards use Google Fonts (Inter) or local system fonts.
+// Automatically disabled if running in fully local mode.
+bool enableOnlineFonts = (!isLocalOnly && strlen(TAILSCALE_KEY) > 0);
 
 // Change this GPIO pin number if your servo signal wire is connected elsewhere
 const int servoPin   = 1;
@@ -49,6 +131,48 @@ int restAngle        = DEFAULT_REST_ANGLE;
 int pressAngle       = DEFAULT_PRESS_ANGLE;
 int pressDurationMs  = DEFAULT_PRESS_DURATION_MS;
 bool isCalibrated    = false;
+
+// Asynchronous test tap state (executed in background loop on Core 1)
+volatile bool pendingTestTap = false;
+int testRestAngle = DEFAULT_REST_ANGLE;
+int testPressAngle = DEFAULT_PRESS_ANGLE;
+int testDurationMs = DEFAULT_PRESS_DURATION_MS;
+
+// Hold safety watchdog state
+volatile bool isHoldActive = false;
+unsigned long holdStartTimeMs = 0;
+const unsigned long MAX_HOLD_DURATION_MS = 10000; // 10 seconds safety limit
+
+// Parse timezone offset string like "0530", "+05:30", "+0630", "-05:00", "-0500", "+5.5", "+5", "-5", "0" into seconds
+inline long parseTimezoneOffsetSec(const char* tzStr) {
+  if (!tzStr || !tzStr[0]) return 0;
+  while (*tzStr == ' ') tzStr++;
+  int sign = 1;
+  if (*tzStr == '-') { sign = -1; tzStr++; }
+  else if (*tzStr == '+') { sign = 1; tzStr++; }
+
+  const char* colon = strchr(tzStr, ':');
+  const char* dot = strchr(tzStr, '.');
+  long hours = 0;
+  long minutes = 0;
+  if (colon) {
+    hours = strtol(tzStr, nullptr, 10);
+    minutes = strtol(colon + 1, nullptr, 10);
+  } else if (dot) {
+    float f = strtof(tzStr, nullptr);
+    return sign * (long)(f * 3600.0f);
+  } else {
+    long val = strtol(tzStr, nullptr, 10);
+    if (val >= 100 || val <= -100) {
+      hours = val / 100;
+      minutes = val % 100;
+    } else {
+      hours = val;
+      minutes = 0;
+    }
+  }
+  return sign * (hours * 3600L + minutes * 60L);
+}
 
 // OTA gate key - Defined in secrets.h as OTA_KEY.
 // If OTA_KEY is non-empty, the user must explicitly provide the key to open the 10-minute
@@ -62,7 +186,6 @@ const unsigned long HEARTBEAT_INTERVAL_MS = 60UL * 1000UL; // 60 seconds
 
 Servo myservo;
 WebServer server(80);
-Preferences prefs;
 
 uint32_t last_press_time = 0;
 // Minimum time to wait between button presses to protect the motor
@@ -70,7 +193,7 @@ const uint32_t PRESS_COOLDOWN_MS = 2000;
 
 // Signals the background worker to move the servo without freezing web requests
 static volatile bool pendingPress = false;
-static TaskHandle_t loopTaskHandle = nullptr;
+extern TaskHandle_t loopTaskHandle;
 static String s_cachedSubnetDeviceId = "";
 
 uint32_t first_boot_epoch = 0;
@@ -101,6 +224,8 @@ float cachedTemp = 0.0f;
 float cachedPower = 0.0f;
 unsigned long lastTempMs = 0;
 unsigned long lastPowerMs = 0;
+static uint32_t cachedFlashTotalKB = 0;
+static uint32_t cachedFlashUsedKB = 0;
 
 // --- Crash logging: ring buffer over individual NVS keys ---
 // Each slot is its own NVS key ("b0".."b24"), so a boot only touches
@@ -110,6 +235,7 @@ struct BootLog {
   uint32_t timestamp;   // Unix timestamp of boot event (0 = empty/no NTP yet)
   uint32_t downtimeSec; // Approx downtime seconds before this boot (0 = unknown/first)
   uint8_t  reasonCode;  // esp_reset_reason_t value (0-10, fits a byte)
+  uint8_t  wifiIdx;     // Index of connected WiFi network (0-5, 0xFF = unknown/none)
 };
 BootLog bootHistory[MAX_BOOT_LOGS]; // RAM cache, indexed by physical slot
 uint32_t bootWriteIdx = 0;          // next physical slot to write
@@ -159,16 +285,19 @@ void triggerPress() {
   myservo.write(pressAngle);
   delay(pressDurationMs);
   myservo.write(restAngle);
-  delay(300);
+  int travelDelay = max(60, abs(pressAngle - restAngle) * 3);
+  delay(travelDelay);
   myservo.detach();
 }
 
 float getEstimatedPowerW() {
-  float current_mA = 15.0;
-  if (ESP.getCpuFreqMHz() == 80) current_mA += 12.0;
-  else if (ESP.getCpuFreqMHz() == 240) current_mA += 30.0;
-  if (WiFi.status() == WL_CONNECTED) current_mA += 80.0;
-  return (current_mA * 3.3) / 1000.0;
+  float current_mA = 18.0f;
+  if (WiFi.status() == WL_CONNECTED) {
+    current_mA += WiFi.getSleep() ? 25.0f : 75.0f;
+  }
+  if (!isLocalOnly && mlRunning) current_mA += 28.0f;
+  if (pendingPress || pendingTestTap || isHoldActive) current_mA += 200.0f;
+  return (current_mA * 3.3f) / 1000.0f;
 }
 
 const char* getResetReasonString(esp_reset_reason_t reason) {
@@ -189,57 +318,66 @@ const char* getResetReasonString(esp_reset_reason_t reason) {
 
 // Load every slot from NVS into the RAM cache. Called once at boot.
 void loadBootHistory() {
-  prefs.begin("esp_log", true); // read-only
-  totalBootCount = prefs.getUInt("boot_cnt", 0);
-  bootWriteIdx   = prefs.getUInt("w_idx", 0) % MAX_BOOT_LOGS;
-  first_boot_epoch = prefs.getUInt("first_boot", 0);
+  Preferences p;
+  p.begin("esp_log", true); // read-only
+  totalBootCount = p.getUInt("boot_cnt", 0);
+  bootWriteIdx   = p.getUInt("w_idx", 0) % MAX_BOOT_LOGS;
+  first_boot_epoch = p.getUInt("first_boot", 0);
   for (int i = 0; i < MAX_BOOT_LOGS; i++) {
     char key[6]; snprintf(key, sizeof(key), "b%d", i);
-    if (!prefs.isKey(key)) {
+    if (!p.isKey(key)) {
       bootHistory[i].timestamp = 0;
       bootHistory[i].downtimeSec = 0;
       bootHistory[i].reasonCode = 0;
+      bootHistory[i].wifiIdx = 0xFF;
       continue;
     }
-    size_t len = prefs.getBytes(key, &bootHistory[i], sizeof(BootLog));
+    size_t len = p.getBytes(key, &bootHistory[i], sizeof(BootLog));
     if (len == sizeof(BootLog)) {
       // modern struct
+    } else if (len == 9) {
+      // legacy struct with downtimeSec and reasonCode, but no wifiIdx
+      bootHistory[i].wifiIdx = 0xFF;
     } else if (len == 5 || len == 8) {
       // legacy struct without downtimeSec
       bootHistory[i].downtimeSec = 0;
+      bootHistory[i].wifiIdx = 0xFF;
     } else {
       bootHistory[i].timestamp = 0;
       bootHistory[i].downtimeSec = 0;
       bootHistory[i].reasonCode = 0;
+      bootHistory[i].wifiIdx = 0xFF;
     }
   }
-  prefs.end();
+  p.end();
 }
 
 // Record this boot: writes only boot_cnt, w_idx, and ONE slot key.
 void recordBootEvent() {
-  prefs.begin("esp_log", false);
-  totalBootCount = prefs.getUInt("boot_cnt", 0) + 1;
-  prefs.putUInt("boot_cnt", totalBootCount);
+  Preferences p;
+  p.begin("esp_log", false);
+  totalBootCount = p.getUInt("boot_cnt", 0) + 1;
+  p.putUInt("boot_cnt", totalBootCount);
 
-  uint32_t idx = prefs.getUInt("w_idx", 0) % MAX_BOOT_LOGS;
+  uint32_t idx = p.getUInt("w_idx", 0) % MAX_BOOT_LOGS;
 
   BootLog entry;
   time_t now; time(&now);
   entry.timestamp = (now > 1600000000UL) ? (uint32_t)now : 0;
   entry.downtimeSec = 0;
   entry.reasonCode = (uint8_t)esp_reset_reason();
+  entry.wifiIdx = 0xFF;
 
   char key[6]; snprintf(key, sizeof(key), "b%u", (unsigned)idx);
-  prefs.putBytes(key, &entry, sizeof(entry));
+  p.putBytes(key, &entry, sizeof(entry));
   bootHistory[idx] = entry;
 
   uint32_t newIdx = (idx + 1) % MAX_BOOT_LOGS;
-  prefs.putUInt("w_idx", newIdx);
+  p.putUInt("w_idx", newIdx);
   bootWriteIdx = newIdx;
 
-  first_boot_epoch = prefs.getUInt("first_boot", 0);
-  prefs.end();
+  first_boot_epoch = p.getUInt("first_boot", 0);
+  p.end();
 }
 
 // chronoIdx: 0 = most recent boot, 1 = one before that, etc.
@@ -250,25 +388,42 @@ bool getBootLogAt(int chronoIdx, BootLog &out) {
   return true;
 }
 
+void updateBootWifiIndex(uint8_t idx) {
+  BootLog latest;
+  if (getBootLogAt(0, latest)) {
+    if (latest.wifiIdx != idx) {
+      latest.wifiIdx = idx;
+      uint32_t slot = (bootWriteIdx - 1 + MAX_BOOT_LOGS) % MAX_BOOT_LOGS;
+      bootHistory[slot] = latest;
+      Preferences pLog;
+      pLog.begin("esp_log", false);
+      char key[6]; snprintf(key, sizeof(key), "b%u", (unsigned)slot);
+      pLog.putBytes(key, &latest, sizeof(latest));
+      pLog.end();
+    }
+  }
+}
+
 // --- Servo trigger NVS logging ---
 void loadServoHistory() {
-  prefs.begin("servo_log", true);
-  servoLogCount  = prefs.getUInt("s_cnt", 0);
-  servoWriteIdx  = prefs.getUInt("s_idx", 0) % MAX_SERVO_LOGS;
+  Preferences p;
+  p.begin("servo_log", true);
+  servoLogCount  = p.getUInt("s_cnt", 0);
+  servoWriteIdx  = p.getUInt("s_idx", 0) % MAX_SERVO_LOGS;
   for (int i = 0; i < MAX_SERVO_LOGS; i++) {
     char key[6]; snprintf(key, sizeof(key), "s%d", i);
-    if (!prefs.isKey(key)) {
+    if (!p.isKey(key)) {
       servoHistory[i].timestamp = 0;
       servoHistory[i].fromCurl = 0;
       continue;
     }
-    size_t len = prefs.getBytes(key, &servoHistory[i], sizeof(ServoLog));
+    size_t len = p.getBytes(key, &servoHistory[i], sizeof(ServoLog));
     if (len != sizeof(ServoLog)) {
       servoHistory[i].timestamp = 0;
       servoHistory[i].fromCurl = 0;
     }
   }
-  prefs.end();
+  p.end();
 }
 
 void recordServoTrigger(bool curl) {
@@ -283,19 +438,20 @@ void recordServoTrigger(bool curl) {
   }
   entry.fromCurl = curl ? 1 : 0;
 
-  prefs.begin("servo_log", false);
-  uint32_t idx = prefs.getUInt("s_idx", 0) % MAX_SERVO_LOGS;
+  Preferences p;
+  p.begin("servo_log", false);
+  uint32_t idx = p.getUInt("s_idx", 0) % MAX_SERVO_LOGS;
   char key[6]; snprintf(key, sizeof(key), "s%u", (unsigned)idx);
-  prefs.putBytes(key, &entry, sizeof(entry));
+  p.putBytes(key, &entry, sizeof(entry));
   servoHistory[idx] = entry;
 
   uint32_t newIdx = (idx + 1) % MAX_SERVO_LOGS;
-  prefs.putUInt("s_idx", newIdx);
+  p.putUInt("s_idx", newIdx);
   servoWriteIdx = newIdx;
 
-  servoLogCount = prefs.getUInt("s_cnt", 0) + 1;
-  prefs.putUInt("s_cnt", servoLogCount);
-  prefs.end();
+  servoLogCount = p.getUInt("s_cnt", 0) + 1;
+  p.putUInt("s_cnt", servoLogCount);
+  p.end();
 }
 
 // chronoIdx: 0 = most recent trigger, 1 = one before that, etc.
@@ -308,34 +464,36 @@ bool getServoLogAt(int chronoIdx, ServoLog &out) {
 
 // --- Tailscale session NVS logging ---
 void loadTailscaleHistory() {
-  prefs.begin("ts_log", true);
-  tailscaleLogCount = prefs.getUInt("ts_cnt", 0);
-  tailscaleWriteIdx = prefs.getUInt("ts_idx", 0) % MAX_TAILSCALE_LOGS;
-  lastTailscaleStopTime = prefs.getUInt("t_stop", 0);
+  Preferences p;
+  p.begin("ts_log", true);
+  tailscaleLogCount = p.getUInt("ts_cnt", 0);
+  tailscaleWriteIdx = p.getUInt("ts_idx", 0) % MAX_TAILSCALE_LOGS;
+  lastTailscaleStopTime = p.getUInt("t_stop", 0);
   for (int i = 0; i < MAX_TAILSCALE_LOGS; i++) {
     char key[6]; snprintf(key, sizeof(key), "t%d", i);
-    if (!prefs.isKey(key)) {
+    if (!p.isKey(key)) {
       tailscaleHistory[i].startTime = 0;
       tailscaleHistory[i].endTime = 0;
       tailscaleHistory[i].downtimeSec = 0;
       continue;
     }
-    size_t len = prefs.getBytes(key, &tailscaleHistory[i], sizeof(TailscaleLog));
+    size_t len = p.getBytes(key, &tailscaleHistory[i], sizeof(TailscaleLog));
     if (len != sizeof(TailscaleLog)) {
       tailscaleHistory[i].startTime = 0;
       tailscaleHistory[i].endTime = 0;
       tailscaleHistory[i].downtimeSec = 0;
     }
   }
-  prefs.end();
+  p.end();
 
   // If previous boot ended with an open/active session, close it using last known heartbeat or RTC memory
   if (tailscaleLogCount > 0) {
     uint32_t activeSlot = ((int)tailscaleWriteIdx - 1 + MAX_TAILSCALE_LOGS) % MAX_TAILSCALE_LOGS;
     if (tailscaleHistory[activeSlot].endTime == 0 && tailscaleHistory[activeSlot].startTime > 0) {
-      prefs.begin("esp_log", true);
-      uint32_t prevAlive = prefs.getUInt("last_alive", 0);
-      prefs.end();
+      Preferences pEsp;
+      pEsp.begin("esp_log", true);
+      uint32_t prevAlive = pEsp.getUInt("last_alive", 0);
+      pEsp.end();
 
       uint32_t closeTime = 0;
       if (rtc_ts_was_active && rtc_ts_duration_s > 0) {
@@ -348,11 +506,12 @@ void loadTailscaleHistory() {
       tailscaleHistory[activeSlot].endTime = closeTime;
       lastTailscaleStopTime = closeTime;
 
-      prefs.begin("ts_log", false);
+      Preferences pTs;
+      pTs.begin("ts_log", false);
       char key[6]; snprintf(key, sizeof(key), "t%u", (unsigned)activeSlot);
-      prefs.putBytes(key, &tailscaleHistory[activeSlot], sizeof(TailscaleLog));
-      prefs.putUInt("t_stop", closeTime);
-      prefs.end();
+      pTs.putBytes(key, &tailscaleHistory[activeSlot], sizeof(TailscaleLog));
+      pTs.putUInt("t_stop", closeTime);
+      pTs.end();
     }
   }
   rtc_ts_was_active = false;
@@ -363,8 +522,9 @@ void recordTailscaleStart() {
   time_t now; time(&now);
   uint32_t nowEpoch = (now > 1600000000UL) ? (uint32_t)now : 0;
 
-  prefs.begin("ts_log", false);
-  uint32_t lastStop = prefs.getUInt("t_stop", 0);
+  Preferences p;
+  p.begin("ts_log", false);
+  uint32_t lastStop = p.getUInt("t_stop", 0);
   if (lastStop == 0 && tailscaleLogCount > 0) {
     uint32_t prevSlot = ((int)tailscaleWriteIdx - 1 + MAX_TAILSCALE_LOGS) % MAX_TAILSCALE_LOGS;
     if (tailscaleHistory[prevSlot].endTime > 0) {
@@ -381,27 +541,28 @@ void recordTailscaleStart() {
   entry.endTime = 0; // 0 = Active / Ongoing
   entry.downtimeSec = downtime;
 
-  uint32_t idx = prefs.getUInt("ts_idx", 0) % MAX_TAILSCALE_LOGS;
+  uint32_t idx = p.getUInt("ts_idx", 0) % MAX_TAILSCALE_LOGS;
   char key[6]; snprintf(key, sizeof(key), "t%u", (unsigned)idx);
-  prefs.putBytes(key, &entry, sizeof(entry));
+  p.putBytes(key, &entry, sizeof(entry));
   tailscaleHistory[idx] = entry;
 
   uint32_t newIdx = (idx + 1) % MAX_TAILSCALE_LOGS;
-  prefs.putUInt("ts_idx", newIdx);
+  p.putUInt("ts_idx", newIdx);
   tailscaleWriteIdx = newIdx;
 
-  tailscaleLogCount = prefs.getUInt("ts_cnt", 0) + 1;
-  prefs.putUInt("ts_cnt", tailscaleLogCount);
-  prefs.end();
+  tailscaleLogCount = p.getUInt("ts_cnt", 0) + 1;
+  p.putUInt("ts_cnt", tailscaleLogCount);
+  p.end();
 }
 
 void recordTailscaleStop() {
   time_t now; time(&now);
   uint32_t nowEpoch = (now > 1600000000UL) ? (uint32_t)now : 0;
 
-  prefs.begin("ts_log", false);
+  Preferences p;
+  p.begin("ts_log", false);
   if (nowEpoch > 0) {
-    prefs.putUInt("t_stop", nowEpoch);
+    p.putUInt("t_stop", nowEpoch);
     lastTailscaleStopTime = nowEpoch;
   }
 
@@ -417,10 +578,10 @@ void recordTailscaleStop() {
         tailscaleHistory[activeSlot].endTime = nowEpoch;
       }
       char key[6]; snprintf(key, sizeof(key), "t%u", (unsigned)activeSlot);
-      prefs.putBytes(key, &tailscaleHistory[activeSlot], sizeof(TailscaleLog));
+      p.putBytes(key, &tailscaleHistory[activeSlot], sizeof(TailscaleLog));
     }
   }
-  prefs.end();
+  p.end();
 }
 
 bool getTailscaleLogAt(int chronoIdx, TailscaleLog &out) {
@@ -431,7 +592,7 @@ bool getTailscaleLogAt(int chronoIdx, TailscaleLog &out) {
 }
 
 void startTailscale(const char* reason = nullptr) {
-  if (mlRunning || ml == nullptr) return;
+  if (isLocalOnly || mlRunning || ml == nullptr) return;
   ESP_LOGI("watchdog", "Starting Tailscale (%s)...", reason ? reason : "failover");
   microlink_start(ml);
   mlRunning = true;
@@ -445,7 +606,7 @@ void startTailscale(const char* reason = nullptr) {
 }
 
 void stopTailscale(const char* reason = nullptr) {
-  if (!mlRunning || ml == nullptr) return;
+  if (isLocalOnly || !mlRunning || ml == nullptr) return;
   ESP_LOGI("watchdog", "Stopping Tailscale (%s)...", reason ? reason : "standby");
   microlink_stop(ml);
   mlRunning = false;
@@ -458,18 +619,23 @@ void stopTailscale(const char* reason = nullptr) {
 }
 
 void syncTimeIfNeeded() {
-  if (!time_synced && WiFi.status() == WL_CONNECTED) {
-    time_t now; time(&now);
+  if (time_synced || WiFi.status() != WL_CONNECTED) return;
+  static unsigned long lastNtpCheckMs = 0;
+  unsigned long nowMs = millis();
+  if (nowMs - lastNtpCheckMs < 1000) return;
+  lastNtpCheckMs = nowMs;
 
-    if (now > 1600000000UL) {
+  time_t now; time(&now);
+  if (now > 1600000000UL) {
       time_synced = true;
       uint32_t thisBootEpoch = (uint32_t)now - (millis() / 1000);
 
-      prefs.begin("esp_log", false);
+      Preferences pLog;
+      pLog.begin("esp_log", false);
 
       if (first_boot_epoch == 0) {
         first_boot_epoch = thisBootEpoch;
-        prefs.putUInt("first_boot", first_boot_epoch);
+        pLog.putUInt("first_boot", first_boot_epoch);
       }
 
       if (!log_time_fixed) {
@@ -479,7 +645,7 @@ void syncTimeIfNeeded() {
           uint32_t slot = (bootWriteIdx - 1 + MAX_BOOT_LOGS) % MAX_BOOT_LOGS;
           bootHistory[slot] = latest;
           char key[6]; snprintf(key, sizeof(key), "b%u", (unsigned)slot);
-          prefs.putBytes(key, &latest, sizeof(latest));
+          pLog.putBytes(key, &latest, sizeof(latest));
         }
         log_time_fixed = true;
       }
@@ -490,31 +656,33 @@ void syncTimeIfNeeded() {
         if (tailscaleHistory[activeSlot].startTime < 1600000000UL) {
           tailscaleHistory[activeSlot].startTime = thisBootEpoch;
           char key[6]; snprintf(key, sizeof(key), "t%u", (unsigned)activeSlot);
-          prefs.begin("ts_log", false);
-          prefs.putBytes(key, &tailscaleHistory[activeSlot], sizeof(TailscaleLog));
-          prefs.end();
+          Preferences pTs;
+          pTs.begin("ts_log", false);
+          pTs.putBytes(key, &tailscaleHistory[activeSlot], sizeof(TailscaleLog));
+          pTs.end();
         }
       }
 
       // If any Servo trigger occurred before NTP synced, fix its timestamp
       if (servoLogCount > 0) {
-        prefs.begin("servo_log", false);
+        Preferences pServo;
+        pServo.begin("servo_log", false);
         for (int i = 0; i < MAX_SERVO_LOGS && i < (int)servoLogCount; i++) {
           if (servoHistory[i].timestamp < 1600000000UL) {
             servoHistory[i].timestamp = thisBootEpoch;
             char key[6]; snprintf(key, sizeof(key), "s%u", (unsigned)i);
-            prefs.putBytes(key, &servoHistory[i], sizeof(ServoLog));
+            pServo.putBytes(key, &servoHistory[i], sizeof(ServoLog));
           }
         }
-        prefs.end();
+        pServo.end();
       }
 
       // --- Downtime estimate: compare against the last heartbeat the
       // previous session managed to write before it died. ---
       if (!last_off_computed) {
-        uint32_t prevAlive = prefs.getUInt("last_alive", 0);
+        uint32_t prevAlive = pLog.getUInt("last_alive", 0);
         lastOffDuration = (prevAlive > 0 && thisBootEpoch > prevAlive) ? (thisBootEpoch - prevAlive) : 0;
-        prefs.putUInt("last_off", lastOffDuration);
+        pLog.putUInt("last_off", lastOffDuration);
 
         BootLog latest;
         if (getBootLogAt(0, latest)) {
@@ -522,18 +690,17 @@ void syncTimeIfNeeded() {
           uint32_t slot = (bootWriteIdx - 1 + MAX_BOOT_LOGS) % MAX_BOOT_LOGS;
           bootHistory[slot] = latest;
           char key[6]; snprintf(key, sizeof(key), "b%u", (unsigned)slot);
-          prefs.putBytes(key, &latest, sizeof(latest));
+          pLog.putBytes(key, &latest, sizeof(latest));
         }
 
         lastAliveEpoch = thisBootEpoch;
-        prefs.putUInt("last_alive", lastAliveEpoch);
+        pLog.putUInt("last_alive", lastAliveEpoch);
         lastHeartbeatMs = millis(); // restart the periodic heartbeat timer from now
         last_off_computed = true;
       }
 
-      prefs.end();
+      pLog.end();
     }
-  }
 }
 
 // Periodic "we're still alive" write - called from loop(). Keeps last_alive
@@ -546,18 +713,26 @@ void heartbeatIfNeeded() {
 
   time_t now; time(&now);
   lastAliveEpoch = (uint32_t)now;
-  prefs.begin("esp_log", false);
-  prefs.putUInt("last_alive", lastAliveEpoch);
-  prefs.end();
+  Preferences p;
+  p.begin("esp_log", false);
+  p.putUInt("last_alive", lastAliveEpoch);
+  p.end();
 }
 
-String formatTimestamp(uint32_t epoch) {
-  if (epoch < 1600000000UL) return "Awaiting NTP Sync...";
+void formatTimestampBuf(uint32_t epoch, char* buf, size_t maxLen) {
+  if (epoch < 1600000000UL) {
+    snprintf(buf, maxLen, "Awaiting NTP Sync...");
+    return;
+  }
   time_t t_epoch = epoch;
   struct tm timeinfo;
   localtime_r(&t_epoch, &timeinfo);
+  strftime(buf, maxLen, "%I:%M:%S %p %d-%b-%Y", &timeinfo);
+}
+
+String formatTimestamp(uint32_t epoch) {
   char buf[64];
-  strftime(buf, sizeof(buf), "%I:%M:%S %p %d-%b-%Y", &timeinfo);
+  formatTimestampBuf(epoch, buf, sizeof(buf));
   return String(buf);
 }
 
@@ -581,6 +756,27 @@ void formatMs(uint32_t ms, char* buffer, size_t maxLen) {
     snprintf(buffer, maxLen, "%lums", (unsigned long)ms);
   }
 }
+
+void getDeviceModelName(char* out, size_t maxLen) {
+#if defined(BOARD_NAME)
+  if (strlen(BOARD_NAME) > 0) {
+    snprintf(out, maxLen, "%s", BOARD_NAME);
+    return;
+  }
+#endif
+  const char* chip = ESP.getChipModel();
+  uint32_t flashMB = cachedFlashTotalKB > 0 ? (cachedFlashTotalKB / 1024) : (ESP.getFlashChipSize() / (1024 * 1024));
+  size_t spiramBytes = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+  if (spiramBytes == 0) spiramBytes = ESP.getPsramSize();
+  uint32_t psramMB = spiramBytes / (1024 * 1024);
+
+  if (psramMB > 0) {
+    snprintf(out, maxLen, "%s-N%luR%lu", chip, (unsigned long)flashMB, (unsigned long)psramMB);
+  } else {
+    snprintf(out, maxLen, "%s-N%lu", chip, (unsigned long)flashMB);
+  }
+}
+
 
 String formatSessionRange(uint32_t startEpoch, uint32_t endEpoch) {
   if (startEpoch < 1600000000UL) return "Awaiting NTP Sync...";
@@ -710,6 +906,7 @@ String getDerpRegionName() {
 }
 
 void getConnectionType(char* out, size_t maxLen) {
+  if (isLocalOnly) { snprintf(out, maxLen, "Local Only"); return; }
   if (mlStandbyMode && !mlRunning) { snprintf(out, maxLen, "Subnet Active"); return; }
   if (ml == nullptr || !mlRunning || !microlink_is_connected(ml)) { snprintf(out, maxLen, "Not Connected"); return; }
   int count = microlink_get_peer_count(ml);
@@ -963,11 +1160,17 @@ void handleMain() {
 void handleInfo() {
   uint32_t ramTotal = ESP.getHeapSize() / 1024;
   uint32_t ramFree = ESP.getFreeHeap() / 1024;
-  uint32_t flashTotal = ESP.getFlashChipSize() / 1024;
-  uint32_t flashUsed = ESP.getSketchSize() / 1024;
+  if (cachedFlashTotalKB == 0) {
+    cachedFlashTotalKB = ESP.getFlashChipSize() / 1024;
+    cachedFlashUsedKB = ESP.getSketchSize() / 1024;
+  }
+  uint32_t flashTotal = cachedFlashTotalKB;
+  uint32_t flashUsed = cachedFlashUsedKB;
   uint32_t psramTotal = heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / 1024;
   uint32_t psramFree = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024;
-  updateSensorCache(); // make sure there's a real reading before the first poll tick
+  if (cachedTemp < -50.0f) {
+    updateSensorCache(); // only read hardware ADC if no reading exists yet
+  }
 
   bool vpnConn = (ml != nullptr) && mlRunning && microlink_is_connected(ml);
   char vpnIpBuf[16] = "Not Valid";
@@ -981,29 +1184,32 @@ void handleInfo() {
   }
   char connTypeBuf[48];
   getConnectionType(connTypeBuf, sizeof(connTypeBuf));
-  const char* tailscaleStatus = vpnConn ? "Connected" : (mlStandbyMode ? "Standby" : "Not Connected");
-  const char* tailscalePillClass = vpnConn ? "on" : (mlStandbyMode ? "standby" : "off");
-  const char* tailscalePillText = vpnConn ? "Connected" : (mlStandbyMode ? "Standby" : "Not Connected");
+  const char* tailscaleStatus = isLocalOnly ? "Disabled (Local Only)" : (vpnConn ? "Connected" : (mlStandbyMode ? "Standby" : "Not Connected"));
+  const char* tailscalePillClass = isLocalOnly ? "off" : (vpnConn ? "on" : (mlStandbyMode ? "standby" : "off"));
+  const char* tailscalePillText = isLocalOnly ? "Local Only" : (vpnConn ? "Connected" : (mlStandbyMode ? "Standby" : "Not Connected"));
 
   char tempBuf[16];
   if (cachedTemp > -50.0f) {
-    snprintf(tempBuf, sizeof(tempBuf), "%.0f C", cachedTemp);
+    snprintf(tempBuf, sizeof(tempBuf), "%.0f °C", cachedTemp);
   } else {
     snprintf(tempBuf, sizeof(tempBuf), "-");
   }
 
   bool hasTemp = (cachedTemp > -50.0f);
   bool hasTsIp = (vpnConn && vpnIpBuf[0] != '-' && strcmp(vpnIpBuf, "Not Valid") != 0);
+  char upBuf[32]; formatDuration(esp_timer_get_time() / 1000000ULL, upBuf, sizeof(upBuf));
+  char devModelBuf[64]; getDeviceModelName(devModelBuf, sizeof(devModelBuf));
 
   if (isCurl()) {
-    char upBuf[32]; formatDuration(esp_timer_get_time() / 1000000ULL, upBuf, sizeof(upBuf));
     char cpuBuf[32]; snprintf(cpuBuf, sizeof(cpuBuf), "%lu MHz", (unsigned long)ESP.getCpuFreqMHz());
+
     const size_t n = 1500;
     std::unique_ptr<char[]> out(new char[n]);
     int off = snprintf(out.get(), n,
       "==================================================\n"
-      " [i] ESP32-S3 DEVICE INFO\n"
-      "==================================================\n"
+      " [i] %s DEVICE INFO\n"
+      "==================================================\n",
+      ESP.getChipModel()
     );
     if (hasTemp) {
       off += snprintf(out.get() + off, n - off,
@@ -1021,10 +1227,11 @@ void handleInfo() {
       );
     }
     off += snprintf(out.get() + off, n - off,
-      " Device     : ESP32-S3-WROOM-N16R8 DOIT\n"
+      " Device     : %s\n"
       "--------------------------------------------------\n"
       " RAM Used   : %lu/%lu KB\n"
       " Flash Used : %lu/%lu KB\n",
+      devModelBuf,
       (ramTotal - ramFree), ramTotal,
       flashUsed, flashTotal
     );
@@ -1038,81 +1245,89 @@ void handleInfo() {
       "--------------------------------------------------\n"
       " Wi-Fi SSID : %s\n"
       " IP Address : %s (esp32.local)\n"
-      " Firmware   : Core 1 | QIO 80MHz | SPIFFS 4MB\n"
-      "--------------------------------------------------\n"
-      " [ TAILSCALE ]\n"
-      " Status     : %s\n"
-      " Hostname   : %s\n",
-      WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
-      tailscaleStatus,
-      TAILSCALE_HOST
+      " Firmware   : Core 1 | QIO 80MHz | SPIFFS 4MB\n",
+      WiFi.SSID().c_str(), WiFi.localIP().toString().c_str()
     );
-    if (hasTsIp) {
+    if (!isLocalOnly) {
       off += snprintf(out.get() + off, n - off,
-        " IP Address : %s\n",
-        vpnIpBuf
+        "--------------------------------------------------\n"
+        " [ TAILSCALE ]\n"
+        " Status     : %s\n"
+        " Hostname   : %s\n",
+        tailscaleStatus,
+        TAILSCALE_HOST
+      );
+      if (hasTsIp) {
+        off += snprintf(out.get() + off, n - off,
+          " IP Address : %s\n",
+          vpnIpBuf
+        );
+      }
+      off += snprintf(out.get() + off, n - off,
+        " Connection : %s\n",
+        connTypeBuf
       );
     }
-    off += snprintf(out.get() + off, n - off,
-      " Connection : %s\n"
-      "==================================================",
-      connTypeBuf
-    );
+    off += snprintf(out.get() + off, n - off, "==================================================");
     server.sendHeader("Connection", "close");
     server.send(200, "text/plain; charset=utf-8", out.get());
   } else {
-    sendWrappedPageStream(server, "Device Info", "&#128187;", [&]() {
-      char b1[600];
-      int off1 = snprintf(b1, sizeof(b1),
-        "<h1>&#128187; Device Info</h1>"
-        "<h3>Live</h3>"
-        "<div class='card'>"
-        "<div class='row'><span class='k'>Uptime</span><span class='v mono' id='up'>--</span></div>"
-        "<div class='row'><span class='k'>CPU Clock</span><span class='v mono' id='clk'>%lu MHz</span></div>",
-        (unsigned long)ESP.getCpuFreqMHz()
+    char b1[600];
+    int off1 = snprintf(b1, sizeof(b1),
+      "<h1>&#128187; Device Info</h1>"
+      "<h3>Live</h3>"
+      "<div class='card'>"
+      "<div class='row'><span class='k'>Uptime</span><span class='v mono' id='up'>%s</span></div>"
+      "<div class='row'><span class='k'>CPU Clock</span><span class='v mono' id='clk'>%lu MHz</span></div>",
+      upBuf,
+      (unsigned long)ESP.getCpuFreqMHz()
+    );
+    if (hasTemp) {
+      off1 += snprintf(b1 + off1, sizeof(b1) - off1,
+        "<div class='row'><span class='k'>CPU Temp.</span><span class='v mono' id='tmp'>%.0f &deg;C</span></div>",
+        cachedTemp
       );
-      if (hasTemp) {
-        off1 += snprintf(b1 + off1, sizeof(b1) - off1,
-          "<div class='row'><span class='k'>CPU Temp.</span><span class='v mono' id='tmp'>%.0f &deg;C</span></div>",
-          cachedTemp
-        );
-      }
-      snprintf(b1 + off1, sizeof(b1) - off1,
-        "<div class='row'><span class='k'>Est. Power</span><span class='v mono' id='pwr'>~%.2f W</span></div>"
-        "</div>",
-        cachedPower
-      );
-      server.sendContent(b1);
+    }
+    snprintf(b1 + off1, sizeof(b1) - off1,
+      "<div class='row'><span class='k'>Est. Power</span><span class='v mono' id='pwr'>~%.2f W</span></div>"
+      "</div>",
+      cachedPower
+    );
 
-      char b2[800];
-      int off2 = snprintf(b2, sizeof(b2),
-        "<h3>Storage &amp; Memory</h3>"
-        "<div class='card'>"
-        "<div class='row'><span class='k'>RAM</span><span class='v mono' id='ram'>%lu/%lu KB</span></div>"
-        "<div class='row'><span class='k'>Flash</span><span class='v mono'>%lu/%lu KB</span></div>",
-        (ramTotal - ramFree), ramTotal,
-        flashUsed, flashTotal
-      );
-      if (psramTotal > 0) {
-        off2 += snprintf(b2 + off2, sizeof(b2) - off2,
-          "<div class='row'><span class='k'>PSRAM</span><span class='v mono'>%lu/%lu KB</span></div>",
-          (unsigned long)(psramTotal - psramFree), (unsigned long)psramTotal
-        );
-      }
-      snprintf(b2 + off2, sizeof(b2) - off2,
-        "</div>"
-        "<h3>Network &amp; Connectivity</h3>"
-        "<div class='card'>"
-        "<div class='row'><span class='k'>Wi-Fi SSID</span><span class='v mono'>%s</span></div>"
-        "<div class='row'><span class='k'>IP Address</span><span class='v mono'>%s</span></div>"
-        "<div class='row'><span class='k'>Hostname</span><span class='v mono'>esp32.local</span></div>"
-        "</div>",
-        WiFi.SSID().c_str(),
-        WiFi.localIP().toString().c_str()
-      );
-      server.sendContent(b2);
+    const char* activeSsid = (configuredWifiNetworks[currentWifiIndex].ssid && configuredWifiNetworks[currentWifiIndex].ssid[0])
+      ? configuredWifiNetworks[currentWifiIndex].ssid : WiFi.SSID().c_str();
 
-      char b3[600];
+    char b2[800];
+    int off2 = snprintf(b2, sizeof(b2),
+      "<h3>Hardware &amp; Storage</h3>"
+      "<div class='card'>"
+      "<div class='row'><span class='k'>Model</span><span class='v mono'>%s</span></div>"
+      "<div class='row'><span class='k'>RAM</span><span class='v mono' id='ram'>%lu/%lu KB</span></div>"
+      "<div class='row'><span class='k'>Flash</span><span class='v mono'>%lu/%lu KB</span></div>",
+      devModelBuf,
+      (ramTotal - ramFree), ramTotal,
+      flashUsed, flashTotal
+    );
+    if (psramTotal > 0) {
+      off2 += snprintf(b2 + off2, sizeof(b2) - off2,
+        "<div class='row'><span class='k'>PSRAM</span><span class='v mono'>%lu/%lu KB</span></div>",
+        (unsigned long)(psramTotal - psramFree), (unsigned long)psramTotal
+      );
+    }
+    snprintf(b2 + off2, sizeof(b2) - off2,
+      "</div>"
+      "<h3>Network &amp; Connectivity</h3>"
+      "<div class='card'>"
+      "<div class='row'><span class='k'>Wi-Fi SSID</span><span class='v mono'>%s</span></div>"
+      "<div class='row'><span class='k'>IP Address</span><span class='v mono'>%s</span></div>"
+      "<div class='row'><span class='k'>Hostname</span><span class='v mono'>esp32.local</span></div>"
+      "</div>",
+      activeSsid,
+      WiFi.localIP().toString().c_str()
+    );
+
+    char b3[600] = "";
+    if (!isLocalOnly) {
       snprintf(b3, sizeof(b3),
         "<h3>Tailscale</h3>"
         "<div class='card'>"
@@ -1121,16 +1336,23 @@ void handleInfo() {
         "<div class='row'><span class='k'>Hostname</span><span class='v mono'>%s</span></div>"
         "<div class='row' id='ts-ip-row'%s><span class='k'>IP Address</span><span class='v mono' id='ts-ip'>%s</span></div>"
         "<div class='row'><span class='k'>Connection</span><span class='v mono' id='ts-conn'>%s</span></div>"
-        "</div>"
-        "<a class='back' href='/main'>&larr; Back to Dashboard</a>",
+        "</div>",
         tailscalePillClass, tailscalePillText,
         TAILSCALE_HOST,
         hasTsIp ? "" : " style='display:none;'",
         vpnIpBuf,
         connTypeBuf
       );
-      server.sendContent(b3);
-    }, POLL_SCRIPT);
+    }
+
+    String body;
+    body.reserve(strlen(b1) + strlen(b2) + strlen(b3) + 80);
+    body += b1;
+    body += b2;
+    body += b3;
+    body += "<a class='back' href='/main'>&larr; Back to Dashboard</a>";
+
+    sendWrappedPage(server, "Device Info", "&#128187;", body.c_str(), "", false);
   }
 }
 
@@ -1175,22 +1397,57 @@ void handleApiLive() {
   }
   char connTypeBuf[48];
   getConnectionType(connTypeBuf, sizeof(connTypeBuf));
-  const char* tsSt = vpnConn ? "Connected" : (mlStandbyMode ? "Standby" : "Not Connected");
-  const char* tsCls = vpnConn ? "on" : (mlStandbyMode ? "standby" : "off");
+  const char* tsSt = isLocalOnly ? "Local Only" : (vpnConn ? "Connected" : (mlStandbyMode ? "Standby" : "Not Connected"));
+  const char* tsCls = isLocalOnly ? "off" : (vpnConn ? "on" : (mlStandbyMode ? "standby" : "off"));
 
   char tsConnectBuf[32] = "";
   if (vpnConn && ts_connect_ms > 0) {
     formatMs(ts_connect_ms, tsConnectBuf, sizeof(tsConnectBuf));
   }
 
-  char json[700];
+  uint32_t ts0_act = 0;
+  char ts0_end_buf[40] = "";
+  char ts0_dur_buf[32] = "";
+  char ts0_dt_buf[64] = "";
+  TailscaleLog ts0 = {};
+  if (getTailscaleLogAt(0, ts0) && tailscaleLogCount > 0 && ts0.startTime > 0) {
+    if (ts0.endTime == 0) {
+      ts0_act = 1;
+      if (nowSec > ts0.startTime) {
+        formatDuration((uint32_t)(nowSec - ts0.startTime), ts0_dur_buf, sizeof(ts0_dur_buf));
+      } else {
+        snprintf(ts0_dur_buf, sizeof(ts0_dur_buf), "0s");
+      }
+    } else {
+      ts0_act = 0;
+      String endStr = formatTimestamp(ts0.endTime);
+      snprintf(ts0_end_buf, sizeof(ts0_end_buf), "%s", endStr.c_str());
+      uint32_t d = (ts0.endTime > ts0.startTime) ? (ts0.endTime - ts0.startTime) : 0;
+      formatDuration(d, ts0_dur_buf, sizeof(ts0_dur_buf));
+    }
+    uint32_t dtSec = ts0.downtimeSec;
+    if (dtSec == 0 && ts0.startTime > 0) {
+      TailscaleLog prevTs = {};
+      if (getTailscaleLogAt(1, prevTs) && prevTs.endTime > 0 && ts0.startTime > prevTs.endTime) {
+        dtSec = ts0.startTime - prevTs.endTime;
+      }
+    }
+    if (dtSec > 0) {
+      char dtDur[32]; formatDuration(dtSec, dtDur, sizeof(dtDur));
+      snprintf(ts0_dt_buf, sizeof(ts0_dt_buf), " &bull; Downtime: %s", dtDur);
+    }
+  }
+
+  char json[896];
   snprintf(json, sizeof(json),
-    "{\"u\":\"%s\",\"uf\":\"%s\",\"t\":%.0f,\"ru\":%lu,\"rt\":%lu,\"c\":%lu,\"p\":%.2f,\"ota\":%d,\"sl\":%lu,\"st\":%lu,\"sc\":%lu,\"ts\":%lu,\"ts_st\":\"%s\",\"ts_cls\":\"%s\",\"ts_ip\":\"%s\",\"ts_conn\":\"%s\",\"ts_cm\":%lu,\"ts_cs\":\"%s\",\"cal\":%d,\"s_rest\":%d,\"s_press\":%d,\"s_dur\":%d}",
+    "{\"u\":\"%s\",\"uf\":\"%s\",\"t\":%.0f,\"ru\":%lu,\"rt\":%lu,\"c\":%lu,\"p\":%.2f,\"ota\":%d,\"sl\":%lu,\"st\":%lu,\"sc\":%lu,\"ts\":%lu,\"ts_st\":\"%s\",\"ts_cls\":\"%s\",\"ts_ip\":\"%s\",\"ts_conn\":\"%s\",\"ts_cm\":%lu,\"ts_cs\":\"%s\",\"ts0_act\":%lu,\"ts0_end\":\"%s\",\"ts0_dur\":\"%s\",\"ts0_dt\":\"%s\",\"cal\":%d,\"s_rest\":%d,\"s_press\":%d,\"s_dur\":%d,\"local\":%d,\"w_idx\":%d,\"w_tot\":%d}",
     upBuf, flashBuf, cachedTemp, (ramTotal - ramFree), ramTotal, ESP.getCpuFreqMHz(), cachedPower,
     otaEnabled ? 1 : 0, (unsigned long)servoTimestamp, (unsigned long)nowSec, (unsigned long)servoLogCount,
     (unsigned long)tsStart, tsSt, tsCls, vpnIpBuf, connTypeBuf,
     (unsigned long)ts_connect_ms, tsConnectBuf,
-    isCalibrated ? 1 : 0, restAngle, pressAngle, pressDurationMs);
+    (unsigned long)ts0_act, ts0_end_buf, ts0_dur_buf, ts0_dt_buf,
+    isCalibrated ? 1 : 0, restAngle, pressAngle, pressDurationMs,
+    isLocalOnly ? 1 : 0, currentWifiIndex + 1, activeWifiCount);
   
   server.sendHeader("Connection", "close");
   server.send(200, "application/json", json);
@@ -1210,29 +1467,28 @@ void handleDebug() {
 
   BootLog latest = {};
   bool hasLatest = getBootLogAt(0, latest) && (totalBootCount > 0);
-  String lastResetCause = hasLatest ? String(getResetReasonString((esp_reset_reason_t)latest.reasonCode)) : "-";
-  String lastResetTime = hasLatest ? formatTimestamp(latest.timestamp) : "-";
+  const char* lastResetCause = hasLatest ? getResetReasonString((esp_reset_reason_t)latest.reasonCode) : "-";
+  char lastResetTime[48] = "-";
+  if (hasLatest) formatTimestampBuf(latest.timestamp, lastResetTime, sizeof(lastResetTime));
 
   ServoLog latestServo = {};
   bool hasServoLatest = getServoLogAt(0, latestServo) && (servoLogCount > 0);
-  String lastServoAgo;
+  char lastServoAgo[48] = "Recent (Pre-NTP)";
   if (hasServoLatest && time_synced && latestServo.timestamp > 0) {
     time_t now; time(&now);
     if ((uint32_t)now > latestServo.timestamp) {
       char agoBuf[32];
       formatDuration((uint32_t)now - latestServo.timestamp, agoBuf, sizeof(agoBuf));
-      lastServoAgo = String(agoBuf) + " ago";
+      snprintf(lastServoAgo, sizeof(lastServoAgo), "%s ago", agoBuf);
     } else {
-      lastServoAgo = "Just now";
+      snprintf(lastServoAgo, sizeof(lastServoAgo), "Just now");
     }
   } else if (hasServoLatest && latestServo.timestamp > 0) {
-    lastServoAgo = "Awaiting NTP Sync...";
-  } else if (hasServoLatest) {
-    lastServoAgo = "Recent (Pre-NTP)";
+    snprintf(lastServoAgo, sizeof(lastServoAgo), "Awaiting NTP Sync...");
   }
 
   TailscaleLog latestTs = {};
-  bool hasTsLatest = getTailscaleLogAt(0, latestTs) && (tailscaleLogCount > 0);
+  bool hasTsLatest = getTailscaleLogAt(0, latestTs) && (tailscaleLogCount > 0) && (latestTs.startTime > 0);
   const char* tailscaleStatus = mlRunning ? "Connected" : (mlStandbyMode ? "Standby" : "Not Connected");
 
   int limitLogs = isCurl() ? 6 : MAX_BOOT_LOGS;
@@ -1247,75 +1503,83 @@ void handleDebug() {
   }
 
   if (isCurl()) {
-    const size_t n = 4800;
-    std::unique_ptr<char[]> out(new char[n]);
-    int off = snprintf(out.get(), n,
+    server.sendHeader("Connection", "close");
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/plain; charset=utf-8", "");
+
+    char b[512];
+    int off = snprintf(b, sizeof(b),
       "==================================================\n"
-      " [!] ESP32-S3 LOGS & DEBUG\n"
+      " [!] %s LOGS & DEBUG\n"
       "==================================================\n\n"
       " Uptime Since Boot    : %s\n"
       " Uptime Since Flash   : %s\n",
+      ESP.getChipModel(),
       bootDuration, flashDuration
     );
 
     if (last_off_computed && lastOffDuration > 0) {
-      off += snprintf(out.get() + off, n - off,
+      off += snprintf(b + off, sizeof(b) - off,
         " Last Approx. Downtime: %s\n", downtimeDuration);
     }
 
-    off += snprintf(out.get() + off, n - off,
+    off += snprintf(b + off, sizeof(b) - off,
       " Boot Time            : %s\n"
       " Wi-Fi Connect        : %s\n",
       bootTimeBuf, wifiConnectBuf
     );
 
-    if (vpnConn && tsConnectBuf[0]) {
-      off += snprintf(out.get() + off, n - off,
+    if (!isLocalOnly && vpnConn && tsConnectBuf[0]) {
+      off += snprintf(b + off, sizeof(b) - off,
         " Tailscale Connect    : %s\n", tsConnectBuf);
     }
 
-    off += snprintf(out.get() + off, n - off,
+    off += snprintf(b + off, sizeof(b) - off,
       " Total Boot Count     : %lu\n"
       " OTA Status           : %s\n",
       totalBootCount,
       otaEnabled ? "Enabled" : "Disabled"
     );
+    server.sendContent(b);
 
     if (hasServoLatest) {
-      off += snprintf(out.get() + off, n - off,
+      snprintf(b, sizeof(b),
         "\n--------------------------------------------------\n\n"
         " [ SERVO ACTIVITY ]\n"
         " Total Triggers       : %lu\n"
         " Last Trigger         : %s (%s)\n",
-        (unsigned long)servoLogCount, lastServoAgo.c_str(), latestServo.fromCurl ? "cURL" : "Web");
+        (unsigned long)servoLogCount, lastServoAgo, latestServo.fromCurl ? "cURL" : "Web");
+      server.sendContent(b);
 
       bool hasServoHistory = false;
       for (int i = 1; i < limitLogs && i < MAX_SERVO_LOGS && i < (int)servoLogCount; i++) {
         ServoLog sentry;
         if (!getServoLogAt(i, sentry)) continue;
         if (!hasServoHistory) {
-          off += snprintf(out.get() + off, n - off, "\n [ PREVIOUS SERVO HISTORY ]\n");
+          server.sendContent("\n [ PREVIOUS SERVO HISTORY ]\n");
           hasServoHistory = true;
         }
-        char timeBuf[40];
+        char timeBuf[48];
         if (sentry.timestamp > 0) {
-          snprintf(timeBuf, sizeof(timeBuf), "%s", formatTimestamp(sentry.timestamp).c_str());
+          formatTimestampBuf(sentry.timestamp, timeBuf, sizeof(timeBuf));
         } else {
           snprintf(timeBuf, sizeof(timeBuf), "Pre-NTP Sync");
         }
-        off += snprintf(out.get() + off, n - off, " [%s] via %s\n",
+        snprintf(b, sizeof(b), " [%s] via %s\n",
           timeBuf, sentry.fromCurl ? "cURL" : "Web");
+        server.sendContent(b);
       }
     }
 
-    off += snprintf(out.get() + off, n - off,
-      "\n--------------------------------------------------\n\n"
-      " [ TAILSCALE ACTIVITY ]\n"
-      " Status          : %s\n"
-      " Total Sessions  : %lu\n",
-      tailscaleStatus, (unsigned long)tailscaleLogCount);
+    if (!isLocalOnly && hasTsLatest) {
+      snprintf(b, sizeof(b),
+        "\n--------------------------------------------------\n\n"
+        " [ TAILSCALE ACTIVITY ]\n"
+        " Status          : %s\n"
+        " Total Sessions  : %lu\n",
+        tailscaleStatus, (unsigned long)tailscaleLogCount);
+      server.sendContent(b);
 
-    if (hasTsLatest) {
       char tsDurBuf[32];
       time_t nowTs; time(&nowTs);
       uint32_t tsDur = 0;
@@ -1336,26 +1600,29 @@ void handleDebug() {
 
       char tsDtBuf[64] = "";
       if (latestDtSec > 0) {
-        char b[32]; formatDuration(latestDtSec, b, sizeof(b));
-        snprintf(tsDtBuf, sizeof(tsDtBuf), " (Downtime: %s)", b);
+        char bDt[32]; formatDuration(latestDtSec, bDt, sizeof(bDt));
+        snprintf(tsDtBuf, sizeof(tsDtBuf), " (Downtime: %s)", bDt);
       }
 
       if (latestTs.endTime == 0) {
-        off += snprintf(out.get() + off, n - off,
+        snprintf(b, sizeof(b),
           " Active Session  : %s%s\n", tsDurBuf, tsDtBuf);
       } else {
-        off += snprintf(out.get() + off, n - off,
+        char startBuf[48];
+        formatTimestampBuf(latestTs.startTime, startBuf, sizeof(startBuf));
+        snprintf(b, sizeof(b),
           " Last Session    : %s%s\n"
           " Last Connected  : %s\n",
-          tsDurBuf, tsDtBuf, formatTimestamp(latestTs.startTime).c_str());
+          tsDurBuf, tsDtBuf, startBuf);
       }
+      server.sendContent(b);
 
       bool hasTsHistory = false;
       for (int i = 1; i < limitLogs && i < (int)tailscaleLogCount && i < MAX_TAILSCALE_LOGS; i++) {
         TailscaleLog tentry = {};
         if (!getTailscaleLogAt(i, tentry) || tentry.startTime == 0) continue;
         if (!hasTsHistory) {
-          off += snprintf(out.get() + off, n - off, "\n [ PREVIOUS TAILSCALE HISTORY ]\n");
+          server.sendContent("\n [ PREVIOUS TAILSCALE HISTORY ]\n");
           hasTsHistory = true;
         }
         char itemDur[32];
@@ -1375,35 +1642,48 @@ void handleDebug() {
         }
         char itemDt[48] = "";
         if (dtSec > 0) {
-          char b[32]; formatDuration(dtSec, b, sizeof(b));
-          snprintf(itemDt, sizeof(itemDt), " (Downtime: %s)", b);
+          char bDt[32]; formatDuration(dtSec, bDt, sizeof(bDt));
+          snprintf(itemDt, sizeof(itemDt), " (Downtime: %s)", bDt);
         }
 
-        off += snprintf(out.get() + off, n - off,
+        char tStartBuf[48];
+        formatTimestampBuf(tentry.startTime, tStartBuf, sizeof(tStartBuf));
+        snprintf(b, sizeof(b),
           " [%s]\n"
           "   Duration: %s%s\n\n",
-          formatTimestamp(tentry.startTime).c_str(),
+          tStartBuf,
           itemDur,
           itemDt);
+        server.sendContent(b);
       }
     }
 
     if (totalBootCount > 0 && hasLatest) {
-      off += snprintf(out.get() + off, n - off,
+      char lastResetTimeBuf[48];
+      formatTimestampBuf(latest.timestamp, lastResetTimeBuf, sizeof(lastResetTimeBuf));
+      snprintf(b, sizeof(b),
         "\n--------------------------------------------------\n\n"
         " [ RESET FORENSICS ]\n"
         " Last Reset Cause     : %s\n"
         " Last Reset Time      : %s\n",
-        lastResetCause.c_str(),
-        lastResetTime.c_str()
+        lastResetCause,
+        lastResetTimeBuf
       );
+      server.sendContent(b);
+
+      if (activeWifiCount > 1 && latest.wifiIdx < TOTAL_WIFI_SLOTS && configuredWifiNetworks[latest.wifiIdx].ssid && configuredWifiNetworks[latest.wifiIdx].ssid[0]) {
+        snprintf(b, sizeof(b),
+          " Connected Wi-Fi      : %s\n",
+          configuredWifiNetworks[latest.wifiIdx].ssid);
+        server.sendContent(b);
+      }
 
       bool hasBootHistory = false;
       for (int i = 1; i < limitLogs; i++) {
         BootLog entry = {};
         if (!getBootLogAt(i, entry) || entry.timestamp == 0) continue;
         if (!hasBootHistory) {
-          off += snprintf(out.get() + off, n - off, "\n [ PREVIOUS BOOT HISTORY ]\n");
+          server.sendContent("\n [ PREVIOUS BOOT HISTORY ]\n");
           hasBootHistory = true;
         }
         char dtStr[48] = "";
@@ -1411,17 +1691,24 @@ void handleDebug() {
           char dtBuf[32]; formatDuration(entry.downtimeSec, dtBuf, sizeof(dtBuf));
           snprintf(dtStr, sizeof(dtStr), " (Downtime: %s)", dtBuf);
         }
-        off += snprintf(out.get() + off, n - off,
+        char wifiStr[64] = "";
+        if (activeWifiCount > 1 && entry.wifiIdx < TOTAL_WIFI_SLOTS && configuredWifiNetworks[entry.wifiIdx].ssid && configuredWifiNetworks[entry.wifiIdx].ssid[0]) {
+          snprintf(wifiStr, sizeof(wifiStr), " (Wi-Fi: %s)", configuredWifiNetworks[entry.wifiIdx].ssid);
+        }
+        char bootEntryTime[48];
+        formatTimestampBuf(entry.timestamp, bootEntryTime, sizeof(bootEntryTime));
+        snprintf(b, sizeof(b),
           " [%s]\n"
-          "   %s%s\n\n",
-          formatTimestamp(entry.timestamp).c_str(),
+          "   %s%s%s\n\n",
+          bootEntryTime,
           getResetReasonString((esp_reset_reason_t)entry.reasonCode),
-          dtStr);
+          dtStr,
+          wifiStr);
+        server.sendContent(b);
       }
     }
-    off += snprintf(out.get() + off, n - off, "==================================================\n");
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/plain; charset=utf-8", out.get());
+    server.sendContent("==================================================\n");
+    server.sendContent(""); // Terminate chunked transfer
   } else {
     sendWrappedPageStream(server, "Logs & Debug", "&#128295;", [&]() {
       char b[768];
@@ -1446,20 +1733,32 @@ void handleDebug() {
         "<h3>Boot Stats</h3>"
         "<div class='card'>"
         "<div class='row'><span class='k'>Boot Time</span><span class='v mono'>%s</span></div>"
-        "<div class='row'><span class='k'>Wi-Fi Connect</span><span class='v mono'>%s</span></div>"
-        "<div class='row' id='ts-connect-row'%s><span class='k'>Tailscale Connect</span><span class='v mono' id='ts-conn-time'>%s</span></div>"
+        "<div class='row'><span class='k'>Wi-Fi Connect</span><span class='v mono'>%s</span></div>",
+        bootTimeBuf, wifiConnectBuf
+      );
+      if (!isLocalOnly) {
+        offBoot += snprintf(b + offBoot, sizeof(b) - offBoot,
+          "<div class='row' id='ts-connect-row'%s><span class='k'>Tailscale Connect</span><span class='v mono' id='ts-conn-time'>%s</span></div>",
+          (vpnConn && tsConnectBuf[0]) ? "" : " style='display:none;'",
+          (vpnConn && tsConnectBuf[0]) ? tsConnectBuf : "--"
+        );
+      }
+      offBoot += snprintf(b + offBoot, sizeof(b) - offBoot,
         "<div class='row'><span class='k'>Total Boots</span><span class='v mono'>%lu</span></div>",
-        bootTimeBuf, wifiConnectBuf,
-        (vpnConn && tsConnectBuf[0]) ? "" : " style='display:none;'",
-        (vpnConn && tsConnectBuf[0]) ? tsConnectBuf : "--",
         totalBootCount
       );
       if (totalBootCount > 0 && hasLatest) {
         offBoot += snprintf(b + offBoot, sizeof(b) - offBoot,
           "<div class='row'><span class='k'>Last Reset Cause</span><span class='v mono'>%s</span></div>"
           "<div class='row'><span class='k'>Last Reset Time</span><span class='v mono'>%s</span></div>",
-          lastResetCause.c_str(), lastResetTime.c_str()
+          lastResetCause, lastResetTime
         );
+        if (activeWifiCount > 1 && latest.wifiIdx < TOTAL_WIFI_SLOTS && configuredWifiNetworks[latest.wifiIdx].ssid && configuredWifiNetworks[latest.wifiIdx].ssid[0]) {
+          offBoot += snprintf(b + offBoot, sizeof(b) - offBoot,
+            "<div class='row'><span class='k'>Connected Wi-Fi</span><span class='v mono'>%s</span></div>",
+            configuredWifiNetworks[latest.wifiIdx].ssid
+          );
+        }
       }
       snprintf(b + offBoot, sizeof(b) - offBoot, "</div>");
       server.sendContent(b);
@@ -1472,7 +1771,7 @@ void handleDebug() {
           "<div class='row'><span class='k'>Trigger Source</span><span class='v mono'>%s</span></div>"
           "<div class='row'><span class='k'>Total Triggers</span><span class='v mono'>%lu</span></div>"
           "</div>",
-          lastServoAgo.c_str(), latestServo.fromCurl ? "cURL" : "Web", servoLogCount);
+          lastServoAgo, latestServo.fromCurl ? "cURL" : "Web", servoLogCount);
         server.sendContent(b);
       }
 
@@ -1481,9 +1780,9 @@ void handleDebug() {
         for (int i = 1; i < MAX_SERVO_LOGS && i < (int)servoLogCount; i++) {
           ServoLog sentry = {};
           if (!getServoLogAt(i, sentry)) continue;
-          char timeBuf[40];
+          char timeBuf[48];
           if (sentry.timestamp > 0) {
-            snprintf(timeBuf, sizeof(timeBuf), "%s", formatTimestamp(sentry.timestamp).c_str());
+            formatTimestampBuf(sentry.timestamp, timeBuf, sizeof(timeBuf));
           } else {
             snprintf(timeBuf, sizeof(timeBuf), "Pre-NTP Sync");
           }
@@ -1503,92 +1802,104 @@ void handleDebug() {
         server.sendContent("</div>");
       }
 
-      server.sendContent("<h3>Tailscale Connection History</h3><div class='card'>");
-      time_t nowTs; time(&nowTs);
-      bool anyTs = false;
-      for (int i = 0; i < MAX_TAILSCALE_LOGS && i < (int)tailscaleLogCount; i++) {
-        TailscaleLog tentry = {};
-        if (!getTailscaleLogAt(i, tentry) || tentry.startTime == 0) continue;
-        anyTs = true;
+      if (!isLocalOnly && hasTsLatest) {
+        server.sendContent("<h3>Tailscale Connection History</h3><div class='card'>");
+        time_t nowTs; time(&nowTs);
+        for (int i = 0; i < MAX_TAILSCALE_LOGS && i < (int)tailscaleLogCount; i++) {
+          TailscaleLog tentry = {};
+          if (!getTailscaleLogAt(i, tentry) || tentry.startTime == 0) continue;
 
-        char durBuf[32];
-        if (tentry.endTime == 0) {
-          uint32_t d = (nowTs > tentry.startTime) ? (uint32_t)(nowTs - tentry.startTime) : 0;
-          formatDuration(d, durBuf, sizeof(durBuf));
-        } else {
-          uint32_t d = (tentry.endTime > tentry.startTime) ? (tentry.endTime - tentry.startTime) : 0;
-          formatDuration(d, durBuf, sizeof(durBuf));
-        }
-
-        uint32_t dtSec = tentry.downtimeSec;
-        if (dtSec == 0 && tentry.startTime > 0) {
-          TailscaleLog prevTs = {};
-          if (getTailscaleLogAt(i + 1, prevTs) && prevTs.endTime > 0 && tentry.startTime > prevTs.endTime) {
-            dtSec = tentry.startTime - prevTs.endTime;
+          char durBuf[32];
+          if (tentry.endTime == 0) {
+            uint32_t d = (nowTs > tentry.startTime) ? (uint32_t)(nowTs - tentry.startTime) : 0;
+            formatDuration(d, durBuf, sizeof(durBuf));
+          } else {
+            uint32_t d = (tentry.endTime > tentry.startTime) ? (tentry.endTime - tentry.startTime) : 0;
+            formatDuration(d, durBuf, sizeof(durBuf));
           }
-        }
 
-        char dtHtml[64] = "";
-        if (dtSec > 0) {
-          char dtBuf[32]; formatDuration(dtSec, dtBuf, sizeof(dtBuf));
-          snprintf(dtHtml, sizeof(dtHtml), " &bull; Downtime: %s", dtBuf);
-        }
+          uint32_t dtSec = tentry.downtimeSec;
+          if (dtSec == 0 && tentry.startTime > 0) {
+            TailscaleLog prevTs = {};
+            if (getTailscaleLogAt(i + 1, prevTs) && prevTs.endTime > 0 && tentry.startTime > prevTs.endTime) {
+              dtSec = tentry.startTime - prevTs.endTime;
+            }
+          }
 
-        const char* badgeClass = "";
-        const char* badgeText = "ENDED";
-        if (tentry.endTime == 0) {
-          badgeClass = "on";
-          badgeText = "ACTIVE";
-        } else if (i == 0) {
-          badgeClass = "latest";
-          badgeText = "LATEST";
-        }
+          char dtHtml[64] = "";
+          if (dtSec > 0) {
+            char dtBuf[32]; formatDuration(dtSec, dtBuf, sizeof(dtBuf));
+            snprintf(dtHtml, sizeof(dtHtml), " &bull; Downtime: %s", dtBuf);
+          }
 
-        String startStr = formatTimestamp(tentry.startTime);
-        String endStr = (tentry.endTime == 0) ? "" : formatTimestamp(tentry.endTime);
+          const char* badgeClass = "";
+          const char* badgeText = "ENDED";
+          if (tentry.endTime == 0) {
+            badgeClass = "on";
+            badgeText = "ACTIVE";
+          } else if (i == 0) {
+            badgeClass = "latest";
+            badgeText = "LATEST";
+          }
 
-        char line[640];
-        if (tentry.endTime == 0) {
-          snprintf(line, sizeof(line),
-            "<div class='log-item%s'>"
-            "<div class='log-meta'>"
-            "<span class='log-title'>Active Session</span>"
-            "<span class='log-sub'>Started: %s</span>"
-            "<span class='log-sub'>Duration: <span id='ts-dur-val'>%s</span>%s</span>"
-            "</div>"
-            "<span class='log-badge %s'>%s</span>"
-            "</div>",
-            (i == 0) ? " latest-entry" : "",
-            startStr.c_str(),
-            durBuf,
-            dtHtml,
-            badgeClass,
-            badgeText);
-        } else {
-          snprintf(line, sizeof(line),
-            "<div class='log-item%s'>"
-            "<div class='log-meta'>"
-            "<span class='log-title'>Tailscale Session</span>"
-            "<span class='log-sub'>Started: %s</span>"
-            "<span class='log-sub'>Ended: %s</span>"
-            "<span class='log-sub'>Duration: <b>%s</b>%s</span>"
-            "</div>"
-            "<span class='log-badge %s'>%s</span>"
-            "</div>",
-            (i == 0) ? " latest-entry" : "",
-            startStr.c_str(),
-            endStr.c_str(),
-            durBuf,
-            dtHtml,
-            badgeClass,
-            badgeText);
+          char startStr[48];
+          formatTimestampBuf(tentry.startTime, startStr, sizeof(startStr));
+          char endStr[48] = "";
+          if (tentry.endTime != 0) formatTimestampBuf(tentry.endTime, endStr, sizeof(endStr));
+
+          char line[768];
+          if (tentry.endTime == 0) {
+            snprintf(line, sizeof(line),
+              "<div class='log-item%s'%s>"
+              "<div class='log-meta'>"
+              "<span class='log-title'%s>Active Session</span>"
+              "<span class='log-sub'%s>Started: %s</span>"
+              "<span class='log-sub'%s style='display:none;'></span>"
+              "<span class='log-sub'%s>Duration: <span id='ts-dur-val'>%s</span><span id='ts-dt-0'>%s</span></span>"
+              "</div>"
+              "<span class='log-badge %s'%s>%s</span>"
+              "</div>",
+              (i == 0) ? " latest-entry" : "",
+              (i == 0) ? " id='ts-item-0'" : "",
+              (i == 0) ? " id='ts-title-0'" : "",
+              (i == 0) ? " id='ts-start-0'" : "",
+              startStr,
+              (i == 0) ? " id='ts-end-0'" : "",
+              (i == 0) ? " id='ts-dur-line-0'" : "",
+              durBuf,
+              dtHtml,
+              badgeClass,
+              (i == 0) ? " id='ts-badge-0'" : "",
+              badgeText);
+          } else {
+            snprintf(line, sizeof(line),
+              "<div class='log-item%s'%s>"
+              "<div class='log-meta'>"
+              "<span class='log-title'%s>Tailscale Session</span>"
+              "<span class='log-sub'%s>Started: %s</span>"
+              "<span class='log-sub'%s>Ended: %s</span>"
+              "<span class='log-sub'%s>Duration: <b>%s</b><span id='ts-dt-0'>%s</span></span>"
+              "</div>"
+              "<span class='log-badge %s'%s>%s</span>"
+              "</div>",
+              (i == 0) ? " latest-entry" : "",
+              (i == 0) ? " id='ts-item-0'" : "",
+              (i == 0) ? " id='ts-title-0'" : "",
+              (i == 0) ? " id='ts-start-0'" : "",
+              startStr,
+              (i == 0) ? " id='ts-end-0'" : "",
+              endStr,
+              (i == 0) ? " id='ts-dur-line-0'" : "",
+              durBuf,
+              dtHtml,
+              badgeClass,
+              (i == 0) ? " id='ts-badge-0'" : "",
+              badgeText);
+          }
+          server.sendContent(line);
         }
-        server.sendContent(line);
+        server.sendContent("</div>");
       }
-      if (!anyTs) {
-        server.sendContent("<div class='row'><span class='k'>Status</span><span class='v mono'>Subnet Active</span></div>");
-      }
-      server.sendContent("</div>");
 
       bool hasBootHist = false;
       for (int i = 1; i < limitLogs; i++) {
@@ -1603,19 +1914,26 @@ void handleDebug() {
           char dtBuf[32]; formatDuration(entry.downtimeSec, dtBuf, sizeof(dtBuf));
           snprintf(dtHtml, sizeof(dtHtml), " &bull; Approx. Downtime: %s", dtBuf);
         }
+        char wifiHtml[64] = "";
+        if (activeWifiCount > 1 && entry.wifiIdx < TOTAL_WIFI_SLOTS && configuredWifiNetworks[entry.wifiIdx].ssid && configuredWifiNetworks[entry.wifiIdx].ssid[0]) {
+          snprintf(wifiHtml, sizeof(wifiHtml), " &bull; Wi-Fi: %s", configuredWifiNetworks[entry.wifiIdx].ssid);
+        }
         char line[320];
         const char* cls = getResetReasonClass((esp_reset_reason_t)entry.reasonCode);
+        char bootEntryTime[48];
+        formatTimestampBuf(entry.timestamp, bootEntryTime, sizeof(bootEntryTime));
         snprintf(line, sizeof(line),
           "<div class='log-item'>"
           "<div class='log-meta'>"
           "<span class='log-title %s'>%s</span>"
-          "<span class='log-sub'>%s%s</span>"
+          "<span class='log-sub'>%s%s%s</span>"
           "</div>"
           "</div>",
           cls,
           getResetReasonString((esp_reset_reason_t)entry.reasonCode),
-          formatTimestamp(entry.timestamp).c_str(),
-          dtHtml);
+          bootEntryTime,
+          dtHtml,
+          wifiHtml);
         server.sendContent(line);
       }
       if (hasBootHist) {
@@ -1668,7 +1986,7 @@ void handleDebug() {
         "</div>"
         "<a class='back' href='/main'>&larr; Back to Dashboard</a>"
       );
-    }, POLL_SCRIPT);
+    }, "");
   }
 }
 
@@ -1706,9 +2024,10 @@ void handleOtaDisable() {
 }
 
 void handleClearLogs() {
-  prefs.begin("esp_log", false);
-  prefs.clear();
-  prefs.end();
+  Preferences p;
+  p.begin("esp_log", false);
+  p.clear();
+  p.end();
 
   memset(bootHistory, 0, sizeof(bootHistory));
   totalBootCount = 0;
@@ -1716,17 +2035,17 @@ void handleClearLogs() {
   log_time_fixed = false;
 
   // Clear servo trigger logs
-  prefs.begin("servo_log", false);
-  prefs.clear();
-  prefs.end();
+  p.begin("servo_log", false);
+  p.clear();
+  p.end();
   memset(servoHistory, 0, sizeof(servoHistory));
   servoLogCount = 0;
   servoWriteIdx = 0;
 
   // Clear Tailscale session logs
-  prefs.begin("ts_log", false);
-  prefs.clear();
-  prefs.end();
+  p.begin("ts_log", false);
+  p.clear();
+  p.end();
   memset(tailscaleHistory, 0, sizeof(tailscaleHistory));
   tailscaleLogCount = 0;
   tailscaleWriteIdx = 0;
@@ -1739,10 +2058,10 @@ void handleClearLogs() {
     time_t now; time(&now);
     first_boot_epoch = (uint32_t)now - (millis() / 1000);
     lastAliveEpoch = (uint32_t)now;
-    prefs.begin("esp_log", false);
-    prefs.putUInt("first_boot", first_boot_epoch);
-    prefs.putUInt("last_alive", lastAliveEpoch);
-    prefs.end();
+    p.begin("esp_log", false);
+    p.putUInt("first_boot", first_boot_epoch);
+    p.putUInt("last_alive", lastAliveEpoch);
+    p.end();
   } else {
     first_boot_epoch = 0;
   }
@@ -1792,6 +2111,7 @@ void handleNotFound() {
 // --- Subnet Failover Logic ---
 
 void checkSubnetAndFailoverIfNeeded() {
+  if (isLocalOnly) return;
 #if defined(TAILSCALE_API_KEY) && defined(TAILSCALE_SUBNET_DEVICE_ID)
   if (strlen(TAILSCALE_API_KEY) == 0 || strlen(TAILSCALE_SUBNET_DEVICE_ID) == 0) return;
 
@@ -1832,6 +2152,58 @@ void checkSubnetAndFailoverIfNeeded() {
 #endif
 }
 
+// Periodic ARP / Gateway keepalive: sends a Gratuitous ARP and a Gateway ARP probe
+// every 45 seconds so consumer Wi-Fi routers (and local devices) never drop 192.168.1.50
+// from their ARP routing table while the ESP32 is in Wi-Fi modem sleep.
+void sendLanArpKeepaliveIfNeeded() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  static unsigned long lastArpKeepaliveMs = 0;
+  unsigned long now = millis();
+  if (now - lastArpKeepaliveMs < 45000) return;
+  lastArpKeepaliveMs = now;
+
+  esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+  if (sta) {
+    struct netif *nif = (struct netif *)esp_netif_get_netif_impl(sta);
+    if (nif) {
+      etharp_gratuitous(nif);
+      ip4_addr_t gw_ip;
+      gw_ip.addr = (uint32_t)gateway;
+      etharp_request(nif, &gw_ip);
+    }
+  }
+}
+
+void checkWifiReconnectIfNeeded() {
+  if (activeWifiCount <= 1) return;
+
+  static unsigned long lastWifiCheckMs = 0;
+  static unsigned long disconnectStartMs = 0;
+  unsigned long now = millis();
+
+  if (now - lastWifiCheckMs < 2000) return;
+  lastWifiCheckMs = now;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    if (disconnectStartMs == 0) {
+      disconnectStartMs = now;
+    } else if (now - disconnectStartMs > 15000) {
+      currentWifiIndex = (currentWifiIndex + 1) % activeWifiCount;
+      ESP_LOGW("wifi", "Connection lost for >15s. Switching to fallback Wi-Fi [%d/%d]: '%s'",
+               currentWifiIndex + 1, activeWifiCount, configuredWifiNetworks[currentWifiIndex].ssid);
+      WiFi.disconnect(false);
+      delay(100);
+      WiFi.begin(configuredWifiNetworks[currentWifiIndex].ssid, configuredWifiNetworks[currentWifiIndex].password);
+      disconnectStartMs = now;
+    }
+  } else {
+    if (disconnectStartMs != 0) {
+      updateBootWifiIndex((uint8_t)currentWifiIndex);
+      disconnectStartMs = 0;
+    }
+  }
+}
+
 void setup() {
   // Run CPU at 80 MHz to save power and keep the chip cool (~38-41°C)
   setCpuFrequencyMhz(80);
@@ -1857,7 +2229,14 @@ void setup() {
   loadTailscaleHistory();
   recordBootEvent();
 
-  // Connect to the home Wi-Fi network using saved credentials
+  // Determine number of configured Wi-Fi networks (1 to 6)
+  activeWifiCount = 0;
+  for (size_t i = 0; i < TOTAL_WIFI_SLOTS; i++) {
+    if (configuredWifiNetworks[i].ssid && strlen(configuredWifiNetworks[i].ssid) > 0) {
+      activeWifiCount++;
+    }
+  }
+
   uint32_t wifi_start = millis();
   WiFi.mode(WIFI_STA);
   wifi_config_t sta_conf;
@@ -1867,15 +2246,47 @@ void setup() {
   }
   WiFi.setAutoReconnect(true);
   WiFi.setSleep(true);
-  WiFi.setTxPower(WIFI_POWER_13dBm);
+  WiFi.setTxPower(WIFI_POWER_15dBm);
   WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS);
   ip_addr_t router_dns;
-  IP_ADDR4(&router_dns, 192, 168, 1, 1);
+  IP_ADDR4(&router_dns, routerDNS[0], routerDNS[1], routerDNS[2], routerDNS[3]);
   dns_setserver(2, &router_dns);
-  WiFi.begin(ssid, password);
 
-  while (WiFi.status() != WL_CONNECTED) delay(100);
-  wifi_connect_ms = millis() - wifi_start;
+  bool connected = false;
+  for (int i = 0; i < activeWifiCount; i++) {
+    ESP_LOGI("wifi", "Attempting Wi-Fi network [%d/%d]: '%s'...", i + 1, activeWifiCount, configuredWifiNetworks[i].ssid);
+    WiFi.begin(configuredWifiNetworks[i].ssid, configuredWifiNetworks[i].password);
+
+    uint32_t attempt_start = millis();
+    uint32_t timeout_ms = (i == 0) ? 12000 : 8000;
+    while (WiFi.status() != WL_CONNECTED && (millis() - attempt_start < timeout_ms)) {
+      delay(100);
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      connected = true;
+      currentWifiIndex = i;
+      updateBootWifiIndex((uint8_t)i);
+      wifi_connect_ms = millis() - wifi_start;
+      ESP_LOGI("wifi", "Connected to Wi-Fi network [%d/%d]: '%s' (IP: %s) in %lu ms",
+               i + 1, activeWifiCount, configuredWifiNetworks[i].ssid,
+               WiFi.localIP().toString().c_str(), wifi_connect_ms);
+      break;
+    } else {
+      ESP_LOGW("wifi", "Failed to connect to Wi-Fi [%d/%d]: '%s'.", i + 1, activeWifiCount, configuredWifiNetworks[i].ssid);
+      WiFi.disconnect(false);
+      delay(150);
+    }
+  }
+
+  if (!connected) {
+    wifi_connect_ms = 0;
+    ESP_LOGE("wifi", "Failed to connect to any configured Wi-Fi network!");
+    if (activeWifiCount > 0) {
+      WiFi.begin(configuredWifiNetworks[0].ssid, configuredWifiNetworks[0].password);
+      currentWifiIndex = 0;
+    }
+  }
 
   // Re-apply listen_interval = 1 to guarantee station wakes on every beacon (102.4ms)
   // preventing AP buffer overflow and packet drops during subnet routing
@@ -1887,53 +2298,60 @@ void setup() {
   // Give 802.11 association, block ack, and router forwarding time to settle
   delay(1500);
 
-  microlink_config_t ml_conf;
-  memset(&ml_conf, 0, sizeof(ml_conf));
-  ml_conf.auth_key = TAILSCALE_KEY;
-  ml_conf.device_name = TAILSCALE_HOST;
-  // Advertise exact same /24 route as moto-g32 for official Tailscale HA subnet failover
-  ml_conf.advertise_routes = "192.168.1.0/24";
-  ml_conf.enable_derp = true;
-  ml_conf.enable_stun = true;
-  ml_conf.enable_disco = true;
-  ml_conf.max_peers = 8;
-  ml_conf.wifi_tx_power_dbm = 13;
+  // Tailscale / Microlink initialization (completely bypassed if in fully local mode)
+  if (!isLocalOnly && strlen(TAILSCALE_KEY) > 0) {
+    microlink_config_t ml_conf;
+    memset(&ml_conf, 0, sizeof(ml_conf));
+    ml_conf.auth_key = TAILSCALE_KEY;
+    ml_conf.device_name = TAILSCALE_HOST;
+    // Advertise exact same /24 route as moto-g32 for official Tailscale HA subnet failover
+    ml_conf.advertise_routes = tailscaleAdvertiseRoute;
+    ml_conf.enable_derp = true;
+    ml_conf.enable_stun = true;
+    ml_conf.enable_disco = true;
+    ml_conf.max_peers = 8;
+    ml_conf.wifi_tx_power_dbm = 13;
 
-  ml = microlink_init(&ml_conf); // initialized, ready for start
+    ml = microlink_init(&ml_conf); // initialized, ready for start
 
 #if defined(TAILSCALE_API_KEY) && defined(TAILSCALE_SUBNET_DEVICE_ID)
-  if (strlen(TAILSCALE_API_KEY) > 0 && strlen(TAILSCALE_SUBNET_DEVICE_ID) > 0) {
-    ESP_LOGI("watchdog", "Tailscale API watchdog active. Target subnet router: %s", TAILSCALE_SUBNET_DEVICE_ID);
-    bool motoOnline = false;
-    for (int attempt = 1; attempt <= 3; attempt++) {
-      if (checkTailscaleSubnetRouterOnline(TAILSCALE_API_KEY, TAILSCALE_SUBNET_DEVICE_ID)) {
-        motoOnline = true;
-        break;
+    if (strlen(TAILSCALE_API_KEY) > 0 && strlen(TAILSCALE_SUBNET_DEVICE_ID) > 0) {
+      ESP_LOGI("watchdog", "Tailscale API watchdog active. Target subnet router: %s", TAILSCALE_SUBNET_DEVICE_ID);
+      bool motoOnline = false;
+      for (int attempt = 1; attempt <= 3; attempt++) {
+        if (checkTailscaleSubnetRouterOnline(TAILSCALE_API_KEY, TAILSCALE_SUBNET_DEVICE_ID)) {
+          motoOnline = true;
+          break;
+        }
+        if (attempt < 3) {
+          ESP_LOGW("watchdog", "Boot check attempt %d/3 failed, retrying in 1s...", attempt);
+          delay(1000);
+        }
       }
-      if (attempt < 3) {
-        ESP_LOGW("watchdog", "Boot check attempt %d/3 failed, retrying in 1s...", attempt);
-        delay(1000);
-      }
-    }
 
-    if (motoOnline) {
-      ESP_LOGI("watchdog", "Subnet router '%s' is CONNECTED to Tailscale. Entering cold STANDBY (~38-41°C).", TAILSCALE_SUBNET_DEVICE_ID);
-      mlRunning = false;
-      mlStandbyMode = true;
-      subnetFailCount = 0;
+      if (motoOnline) {
+        ESP_LOGI("watchdog", "Subnet router '%s' is CONNECTED to Tailscale. Entering cold STANDBY (~38-41°C).", TAILSCALE_SUBNET_DEVICE_ID);
+        mlRunning = false;
+        mlStandbyMode = true;
+        subnetFailCount = 0;
+      } else {
+        ESP_LOGW("watchdog", "Subnet router '%s' is NOT connected to Tailscale. Starting Tailscale failover immediately.", TAILSCALE_SUBNET_DEVICE_ID);
+        startTailscale("boot - subnet router disconnected from Tailscale");
+      }
     } else {
-      ESP_LOGW("watchdog", "Subnet router '%s' is NOT connected to Tailscale. Starting Tailscale failover immediately.", TAILSCALE_SUBNET_DEVICE_ID);
-      startTailscale("boot - subnet router disconnected from Tailscale");
+      ESP_LOGI("watchdog", "No TAILSCALE_API_KEY configured. Connecting directly to Tailscale at boot.");
+      startTailscale("direct startup");
     }
-  } else {
-    ESP_LOGI("watchdog", "No TAILSCALE_API_KEY configured. Connecting directly to Tailscale at boot.");
-    startTailscale("direct startup");
-  }
 #else
-  startTailscale("direct startup");
+    startTailscale("direct startup");
 #endif
+  } else {
+    ESP_LOGI("system", "Running in FULLY LOCAL MODE (Tailscale & Microlink bypassed).");
+    mlRunning = false;
+    mlStandbyMode = false;
+  }
 
-  configTime(19800, 0, "216.239.35.0", "pool.ntp.org", "time.google.com");
+  configTime(parseTimezoneOffsetSec(TIMEZONE_OFFSET), 0, "216.239.35.0", "pool.ntp.org", "time.google.com");
 
   if (MDNS.begin("esp32")) {
     MDNS.addService("http", "tcp", 80);
@@ -1958,6 +2376,14 @@ void setup() {
   server.on("/reboot", HTTP_ANY, handleReboot);
   server.on("/clear-logs", HTTP_ANY, handleClearLogs);
   server.on("/api/live", HTTP_GET, handleApiLive);
+  server.on("/style.css", HTTP_GET, []() {
+    server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
+    server.send_P(200, "text/css; charset=utf-8", COMMON_CSS);
+  });
+  server.on("/app.js", HTTP_GET, []() {
+    server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
+    server.send_P(200, "application/javascript; charset=utf-8", APP_JS);
+  });
   server.on("/ota/enable", HTTP_POST, handleOtaEnable);
   server.on("/ota/disable", HTTP_POST, handleOtaDisable);
   registerCalibrationRoutes(server);
@@ -1970,7 +2396,7 @@ void setup() {
     [](void*) {
       for (;;) {
         server.handleClient();
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(2));
       }
     },
     "http_srv",   /* task name   */
@@ -1981,6 +2407,28 @@ void setup() {
     0             /* Core 0 — microlink net_io and derp_tx also run here,
                      keeping WebServer off Core 1 where wg_mgr lives */
   );
+
+#if defined(TAILSCALE_API_KEY) && defined(TAILSCALE_SUBNET_DEVICE_ID)
+  if (!isLocalOnly && strlen(TAILSCALE_API_KEY) > 0 && strlen(TAILSCALE_SUBNET_DEVICE_ID) > 0) {
+    // Dedicated low-priority watchdog task (Core 0) so blocking TLS HTTPS checks
+    // to api.tailscale.com NEVER stall Core 1, loop(), or instantaneous servo actuation.
+    xTaskCreatePinnedToCore(
+      [](void*) {
+        vTaskDelay(pdMS_TO_TICKS(45000));
+        for (;;) {
+          checkSubnetAndFailoverIfNeeded();
+          vTaskDelay(pdMS_TO_TICKS(45000));
+        }
+      },
+      "ts_watchdog",
+      8192,
+      nullptr,
+      1,
+      nullptr,
+      0
+    );
+  }
+#endif
 
   loopTaskHandle = xTaskGetCurrentTaskHandle();
   boot_time_ms = millis();
@@ -1999,11 +2447,37 @@ void loop() {
     triggerPress();
   }
 
+  // Execute test tap from calibration page in background
+  if (pendingTestTap) {
+    pendingTestTap = false;
+    initServo();
+    myservo.attach(servoPin, 500, 2400);
+    myservo.write(testPressAngle);
+    delay(testDurationMs);
+    myservo.write(testRestAngle);
+    int returnTime = max(60, abs(testPressAngle - testRestAngle) * 3);
+    delay(returnTime);
+    myservo.detach();
+  }
+
+  // Safety watchdog for calibration manual hold: auto-release if held > MAX_HOLD_DURATION_MS (10000ms)
+  if (isHoldActive && (millis() - holdStartTimeMs > MAX_HOLD_DURATION_MS)) {
+    isHoldActive = false;
+    initServo();
+    myservo.attach(servoPin, 500, 2400);
+    myservo.write(restAngle);
+    delay(100);
+    myservo.detach();
+    ESP_LOGW("servo", "Calibration hold auto-released after safety timeout (%lu ms)", MAX_HOLD_DURATION_MS);
+  }
+
   // Sync clock with internet time and save heartbeat to measure outage downtime
   if (!time_synced) syncTimeIfNeeded();
   heartbeatIfNeeded();
-  // Check if primary router is alive, or switch to backup if it went down
-  checkSubnetAndFailoverIfNeeded();
+  // Keep router and local LAN ARP caches fresh during Wi-Fi modem sleep
+  sendLanArpKeepaliveIfNeeded();
+  // Check if primary Wi-Fi is alive, or failover to backup network
+  checkWifiReconnectIfNeeded();
 
   if (mlRunning && mlStartedAtMs > 0) {
     rtc_ts_duration_s = (millis() - mlStartedAtMs) / 1000;
@@ -2013,6 +2487,7 @@ void loop() {
     }
   }
 
-  // Put chip to sleep to save power; wakes up instantly when a button is clicked
-  ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+  // Responsive 10ms sleep: wakes up instantly when a button is clicked or upon timeout;
+  // FreeRTOS tickless idle (waiti 0) halts the CPU during this interval to preserve low temperature.
+  ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
 }

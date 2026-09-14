@@ -2,9 +2,14 @@
 #include <Arduino.h>
 #include <WebServer.h>
 
+extern bool enableOnlineFonts;
+
+// External Google Font import (used when device is connected to internet/Tailscale)
+static const char GOOGLE_FONT_IMPORT[] =
+"@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');";
+
 // Shared CSS styling for all web pages (cyber-dark theme and responsive cards)
 static const char COMMON_CSS[] =
-"@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');"
 ":root{--bg:#000000;--surface:rgba(15,23,36,0.72);--surface-c:rgba(26,38,56,0.65);"
 "--surface-border:rgba(255,255,255,0.08);--primary:#8ab4f8;--primary-glow:rgba(138,180,248,0.25);"
 "--on-surface:#e2e8f0;--on-surface-v:#7c8ba1;--outline:rgba(255,255,255,0.07);"
@@ -82,8 +87,10 @@ static const char COMMON_CSS[] =
 ".log-badge.standby{background:rgba(138,180,248,0.15);border:1px solid rgba(138,180,248,0.3);color:var(--primary);}"
 ".actions{display:flex;gap:12px;margin-top:10px;}"
 ".actions form{flex:1;margin:0;}"
-"input[type=password]{height:48px;min-height:48px;background:var(--surface-c);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid var(--surface-border);color:var(--on-surface);font-family:'Inter',sans-serif;font-size:13px;padding:0 16px;border-radius:24px;box-sizing:border-box;outline:none;text-align:center;transition:all .2s ease;}"
-"input[type=password]:focus{border-color:var(--primary);box-shadow:0 0 16px rgba(138,180,248,0.25);}"
+"input[type=password]{height:48px;min-height:48px;background:var(--surface-c);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid var(--surface-border);color:var(--on-surface);font-family:'Inter',sans-serif;font-size:13px;padding:0 16px;border-radius:24px;box-sizing:border-box;outline:none;text-align:center;transition:all .2s cubic-bezier(0.4,0,0.2,1);}"
+"input[type=password]:hover{transform:translateY(-2px);border-color:rgba(138,180,248,0.4);filter:brightness(1.12);box-shadow:0 8px 24px rgba(0,0,0,0.4),0 0 16px rgba(138,180,248,0.15);}"
+"input[type=password]:focus{border-color:var(--primary);box-shadow:0 0 16px rgba(138,180,248,0.25);transform:translateY(-2px);}"
+"input[type=password]:active{transform:translateY(1px) scale(0.98);filter:brightness(0.95);}"
 "button{width:100%;display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--surface-c);"
 "backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid var(--surface-border);color:var(--on-surface);"
 "font-family:'Inter',sans-serif;font-weight:600;letter-spacing:0.4px;text-transform:uppercase;padding:0 18px;border-radius:24px;"
@@ -107,13 +114,15 @@ static const char COMMON_CSS[] =
 ".pill.standby{background:rgba(138,180,248,0.15);border:1px solid rgba(138,180,248,0.3);color:var(--primary);}"
 ".divider{border:none;border-top:1px solid var(--outline);margin:24px 0;}";
 
-// Background script that updates stats every 3.5 seconds only while the tab is open
-static const char POLL_SCRIPT[] =
-"<script>"
-"let __poll;"
+// Background polling script (now bundled directly into cached /app.js for 0-byte inline overhead)
+static const char POLL_SCRIPT[] = "";
+
+// Shared client JavaScript for live telemetry polling, copy-to-clipboard actions, haptics, and log expansion
+static const char APP_JS[] =
+"var __poll;"
 "function __fmtAgo(s){"
 "if(s<=2)return 'Just now';"
-"let d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60),sec=s%60,o='';"
+"var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60),sec=s%60,o='';"
 "if(d>0)o+=d+'d ';"
 "if(h>0)o+=h+'h ';"
 "if(m>0)o+=m+'m ';"
@@ -122,14 +131,15 @@ static const char POLL_SCRIPT[] =
 "}"
 "function __fmtDur(s){"
 "if(s<=0)return '0s';"
-"let d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60),sec=s%60,o='';"
+"var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60),sec=s%60,o='';"
 "if(d>0)o+=d+'d ';"
 "if(h>0)o+=h+'h ';"
 "if(m>0)o+=m+'m ';"
 "if(sec>0||!o)o+=sec+'s';"
 "return o.trim();"
 "}"
-"function __pollTick(){fetch('/api/live').then(function(r){return r.json();}).then(function(d){"
+"function __pollTick(){"
+"fetch('/api/live').then(function(r){return r.json();}).then(function(d){"
 "var el;"
 "if(el=document.getElementById('up'))el.textContent=d.u;"
 "if(el=document.getElementById('upf'))el.textContent=d.uf;"
@@ -138,10 +148,25 @@ static const char POLL_SCRIPT[] =
 "if(el=document.getElementById('ram'))el.textContent=d.ru+'/'+d.rt+' KB';"
 "if(el=document.getElementById('clk'))el.textContent=d.c+' MHz';"
 "if(el=document.getElementById('servo-ago')){"
-"if(d.sl>0 && d.st>=d.sl){el.textContent=__fmtAgo(d.st-d.sl);}"
+"if(d.sl>0&&d.st>=d.sl){el.textContent=__fmtAgo(d.st-d.sl);}"
 "}"
 "if(el=document.getElementById('ts-dur-val')){"
-"if(d.ts>0 && d.st>=d.ts){el.textContent=__fmtDur(d.st-d.ts);}"
+"if(d.ts>0&&d.st>=d.ts){el.textContent=__fmtDur(d.st-d.ts);}"
+"}"
+"var tsItem=document.getElementById('ts-item-0');"
+"if(tsItem&&d.ts0_dur){"
+"var b=document.getElementById('ts-badge-0'),t=document.getElementById('ts-title-0'),e=document.getElementById('ts-end-0'),l=document.getElementById('ts-dur-line-0'),dt=document.getElementById('ts-dt-0');"
+"if(d.ts0_act===1){"
+"if(b){b.className='log-badge on';b.textContent='ACTIVE';}"
+"if(t)t.textContent='Active Session';"
+"if(e)e.style.display='none';"
+"if(l)l.innerHTML='Duration: <span id=\"ts-dur-val\">'+(d.ts>0&&d.st>=d.ts?__fmtDur(d.st-d.ts):d.ts0_dur)+'</span><span id=\"ts-dt-0\">'+(d.ts0_dt||'')+'</span>';"
+"}else{"
+"if(b){b.className='log-badge latest';b.textContent='LATEST';}"
+"if(t)t.textContent='Tailscale Session';"
+"if(e){e.style.display='';e.textContent='Ended: '+d.ts0_end;}"
+"if(l)l.innerHTML='Duration: <b>'+d.ts0_dur+'</b><span id=\"ts-dt-0\">'+(d.ts0_dt||'')+'</span>';"
+"}"
 "}"
 "if(el=document.getElementById('ts-pill')){"
 "el.textContent=d.ts_st;el.className='pill '+d.ts_cls;"
@@ -158,16 +183,12 @@ static const char POLL_SCRIPT[] =
 "if(d.ts_cls==='on'&&d.ts_cs){r.style.display='';if(el=document.getElementById('ts-conn-time'))el.textContent=d.ts_cs;}"
 "else{r.style.display='none';}"
 "}"
-"}).catch(function(){});}"
-"function __pollStart(){if(__poll)return;__pollTick();__poll=setInterval(__pollTick,3500);}"
-"function __pollStop(){if(__poll){clearInterval(__poll);__poll=null;}}"
+"}).catch(function(){}).finally(function(){__scheduleNext(3500);});"
+"}"
+"function __scheduleNext(ms){if(!document.hidden){clearTimeout(__poll);__poll=setTimeout(__pollTick,ms||3500);}}"
+"function __pollStart(){if(!document.getElementById('up')&&!document.getElementById('ram'))return;if(__poll)return;__scheduleNext(3500);}"
+"function __pollStop(){if(__poll){clearTimeout(__poll);__poll=null;}}"
 "document.addEventListener('visibilitychange',function(){if(document.hidden)__pollStop();else __pollStart();});"
-"if(!document.hidden)__pollStart();"
-"</script>";
-
-// Helper script for copy-to-clipboard actions and mobile vibration feedback
-static const char HAPTIC_SCRIPT[] =
-"<script>"
 "function __showToast(msg){"
 "var t=document.getElementById('copy-toast');"
 "if(!t){t=document.createElement('div');t.id='copy-toast';t.className='copy-toast';document.body.appendChild(t);}"
@@ -191,14 +212,6 @@ static const char HAPTIC_SCRIPT[] =
 "try{document.execCommand('copy');done();}catch(e){}"
 "document.body.removeChild(ta);"
 "}"
-"document.addEventListener('pointerenter',function(e){"
-"var el=e.target.closest('.row,.log-item');"
-"if(el&&navigator.vibrate&&e.pointerType!=='mouse'){navigator.vibrate(4);}"
-"},true);"
-"document.addEventListener('touchstart',function(e){"
-"var el=e.target.closest('.row,.log-item');"
-"if(el&&navigator.vibrate){navigator.vibrate(4);}"
-"},{passive:true});"
 "document.addEventListener('click',function(e){"
 "var b=e.target.closest('button,.nav a,a.back');"
 "if(b){"
@@ -215,20 +228,20 @@ static const char HAPTIC_SCRIPT[] =
 "}"
 "return;"
 "}"
-"  if(e.target.closest('input, select, textarea, [type=range], .no-copy')) return;"
-"  var item=e.target.closest('.row,.log-item');"
-"  if(item&&!item.classList.contains('no-copy')){"
-"    var vEl=item.querySelector('.v');"
-"    if(vEl){"
-"      __copyText(vEl.innerText.trim());"
-"    }else if(item.classList.contains('log-item')){"
-"      var tEl=item.querySelector('.log-title');"
-"      var sEls=item.querySelectorAll('.log-sub');"
-"      var sText=Array.from(sEls).map(function(s){return s.innerText.trim();}).join(' | ');"
-"      var txt=tEl?tEl.innerText.trim()+(sText?' ('+sText+')':''):item.innerText.trim();"
-"      __copyText(txt);"
-"    }"
-"  }"
+"if(e.target.closest('input, select, textarea, [type=range], .no-copy')) return;"
+"var item=e.target.closest('.row,.log-item');"
+"if(item&&!item.classList.contains('no-copy')){"
+"var vEl=item.querySelector('.v');"
+"if(vEl){"
+"__copyText(vEl.innerText.trim());"
+"}else if(item.classList.contains('log-item')){"
+"var tEl=item.querySelector('.log-title');"
+"var sEls=item.querySelectorAll('.log-sub');"
+"var sText=Array.from(sEls).map(function(s){return s.innerText.trim();}).join(' | ');"
+"var txt=tEl?tEl.innerText.trim()+(sText?' ('+sText+')':''):item.innerText.trim();"
+"__copyText(txt);"
+"}"
+"}"
 "});"
 "function __initLogToggles(){"
 "document.querySelectorAll('.card').forEach(function(card){"
@@ -265,63 +278,62 @@ static const char HAPTIC_SCRIPT[] =
 "}"
 "});"
 "}"
-"if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',__initLogToggles);}"
-"else{__initLogToggles();}"
-"</script>";
+"function __initApp(){"
+"__initLogToggles();"
+"if(!document.hidden)__pollStart();"
+"}"
+"if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',__initApp);}"
+"else{__initApp();}";
 
-// Wraps an HTML body with the standard page header, CSS styles, and footer
+// Wraps an HTML body with standard page header linking to cached CSS and JS
 inline String wrapPage(const char* title, const char* icon, const char* bodyHtml, const char* extraScript = "", bool centered = false) {
   String out;
-  out.reserve(strlen(bodyHtml) + sizeof(COMMON_CSS) + sizeof(HAPTIC_SCRIPT) + strlen(extraScript) + 500);
+  out.reserve(strlen(bodyHtml) + (extraScript ? strlen(extraScript) : 0) + 600);
   out += "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'><title>";
   out += title;
   out += "</title><link rel='icon' href='data:image/svg+xml,%3Csvg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"%3E%3Ctext y=\".9em\" font-size=\"90\"%3E";
   out += icon;
-  out += "%3C/text%3E%3C/svg%3E'><style>";
-  out += COMMON_CSS;
-  out += "</style>";
+  out += "%3C/text%3E%3C/svg%3E'>";
+  if (enableOnlineFonts) {
+    out += "<link rel='stylesheet' href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap'>";
+  }
+  out += "<link rel='stylesheet' href='/style.css?v=3'><script defer src='/app.js?v=3'></script>";
   out += "</head><body><div class='wrap";
   if (centered) out += " centered";
   out += "'>";
   out += bodyHtml;
   out += "</div>";
-  out += HAPTIC_SCRIPT;
-  out += extraScript;
+  if (extraScript && extraScript[0]) out += extraScript;
   out += "</body></html>";
   return out;
 }
 
-// Streams web pages in small pieces to save memory and keep the chip fast
+// Streams web pages in unified chunks with zero heap allocation and minimal TCP packet fragmentation
 template <typename F>
 inline void sendWrappedPageStream(WebServer &server, const char* title, const char* icon, F bodyWriter, const char* extraScript = "", bool centered = false) {
   server.sendHeader("Connection", "close");
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.send(200, "text/html; charset=utf-8", "");
 
-  String head;
-  head.reserve(sizeof(COMMON_CSS) + 400);
-  head = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'><title>";
-  head += title;
-  head += "</title><link rel='icon' href='data:image/svg+xml,%3Csvg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"%3E%3Ctext y=\".9em\" font-size=\"90\"%3E";
-  head += icon;
-  head += "%3C/text%3E%3C/svg%3E'><style>";
-  head += COMMON_CSS;
-  head += "</style></head><body><div class='wrap";
-  if (centered) head += " centered";
-  head += "'>";
-  server.sendContent(head);
+  char headBuf[600];
+  snprintf(headBuf, sizeof(headBuf),
+    "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'><title>%s</title>"
+    "<link rel='icon' href='data:image/svg+xml,%%3Csvg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"%%3E%%3Ctext y=\".9em\" font-size=\"90\"%%3E%s%%3C/text%%3E%%3C/svg%%3E'>"
+    "%s"
+    "<link rel='stylesheet' href='/style.css?v=3'><script defer src='/app.js?v=3'></script></head><body><div class='wrap%s'>",
+    title, icon,
+    enableOnlineFonts ? "<link rel='stylesheet' href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap'>" : "",
+    centered ? " centered" : ""
+  );
+  server.sendContent(headBuf);
 
   bodyWriter();
 
-  String foot;
-  foot.reserve(sizeof(HAPTIC_SCRIPT) + (extraScript ? strlen(extraScript) : 0) + 100);
-  foot = "</div>";
-  foot += HAPTIC_SCRIPT;
+  server.sendContent(F("</div>"));
   if (extraScript && extraScript[0]) {
-    foot += extraScript;
+    server.sendContent(extraScript);
   }
-  foot += "</body></html>";
-  server.sendContent(foot);
+  server.sendContent(F("</body></html>"));
   server.sendContent(""); // Terminate chunked transfer
 }
 
