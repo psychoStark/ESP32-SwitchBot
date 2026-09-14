@@ -3,8 +3,8 @@ name: Deploy Documentation
 on:
   push:
     branches:
-      - main
-      - update
+      - website
+  workflow_dispatch:
 
 permissions:
   contents: read

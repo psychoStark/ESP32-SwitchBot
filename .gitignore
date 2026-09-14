@@ -1,0 +1,10 @@
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+.DS_Store
+build/
+sdkconfig
+main/
+components/
+managed_components/
+.vscode/
