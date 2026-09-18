@@ -23,8 +23,9 @@ Version **v1.2** builds directly upon the v1.0 production baseline, focusing on 
 * **Full-Stream Web Delivery & Battery-Saving Polling:** Streamed JavaScript directly with `sendWrappedPageStream`, tuned live polling to 4.5s, and halted polling when the tab is hidden (`document.hidden`).
 * **Dynamic Servo Card Telemetry:** Rendered the debug Servo telemetry card permanently and added live DOM updates for trigger age, source ("cURL" vs "Web"), and total counts.
 * **Firmware Version Display:** Monospace `v1.2` footer on `/debug`, cURL terminal view, and `/api/live` telemetry.
-* **Cross-Platform Progressive Web App (PWA):** Standalone installable PWA for iOS, Android, and Desktop with `/manifest.webmanifest`, precaching Service Worker (`/sw.js`), native `⚡` SVG icon, and safe-area notch padding.
-* **Long-Term Browser Caching:** Configured HTTP headers (`Cache-Control: public, max-age=604800, immutable`) for `/style.css`, `/app.js`, `/manifest.webmanifest`, and `/icon.svg`.
+* **Cross-Platform Progressive Web App (PWA):** Standalone installable PWA for iOS, Android, and Desktop with `/manifest.webmanifest`, native `⚡` PNG/SVG icons, standalone `/main` launch routing, and safe-area notch padding.
+* **Live Network Actuation:** Configured with strict no-cache headers (`Cache-Control: no-cache, no-store, must-revalidate`) and self-destructing cleanup worker to guarantee all actuations and telemetry are live with zero offline simulation.
+* **Long-Term Asset Caching:** Configured immutable HTTP headers (`Cache-Control: public, max-age=604800, immutable`) for static `/style.css`, `/app.js`, `/manifest.webmanifest`, and `/icon.svg`.
 
 ---
 

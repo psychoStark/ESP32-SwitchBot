@@ -90,7 +90,10 @@ Returns a compact JSON payload containing real-time system metrics, temperatures
 Returns the Web App Manifest declaring standalone window display, dark theme, and orientation.
 
 ### `GET /sw.js`
-Serves the precaching Service Worker caching the UI shell (`/style.css`, `/app.js`, `/manifest.webmanifest`, `/icon.svg`).
+Serves a self-destructing cleanup worker that purges legacy browser offline caches and unregisters itself to enforce live network actuation.
+
+### `GET /icon-192.png` & `GET /icon-512.png`
+Serves raster PNG icons with the `⚡` symbol for Android WebAPK minting and iOS home screen icons.
 
 ### `GET /icon.svg` & `GET /favicon.ico`
 Returns the native `⚡` scalable SVG icon.

@@ -216,4 +216,4 @@ The dashboard is a fully optimized Progressive Web App:
 * **iOS Safari:** Tap the **Share** button $\rightarrow$ select **"Add to Home Screen"**. The app opens in an edge-to-edge standalone window with full support for safe-area notch and home indicator cutouts.
 * **Android Chrome:** Tap the three dots menu $\rightarrow$ tap **"Install App"** (or click the automatic install prompt).
 * **Desktop (Chrome / Edge):** Click the install icon in the URL bar to run SwitchBot in its own native app window.
-* **Offline Precaching:** Powered by `/sw.js`, core UI styles, scripts, and vector `⚡` icons load instantly from local browser cache.
+* **Live Network Actuation:** Enforces live network requests with `Cache-Control: no-cache, no-store, must-revalidate` across all endpoints so actuations and live telemetry always reflect real-time physical device state.
