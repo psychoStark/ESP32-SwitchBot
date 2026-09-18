@@ -8,7 +8,42 @@ extern bool enableOnlineFonts;
 static const char GOOGLE_FONT_IMPORT[] =
 "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');";
 
-// Shared CSS styling for all web pages (cyber-dark theme and responsive cards)
+// Scalable SVG icon using ⚡ emoji for home screen, browser tabs, and bookmarking
+static const char ICON_SVG[] =
+"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
+"<style>text{font-family:system-ui,-apple-system,sans-serif;}</style>"
+"<text y='.9em' font-size='90'>⚡</text>"
+"</svg>";
+
+// Web App Manifest for cross-platform PWA installation (Desktop, Android, iOS)
+static const char MANIFEST_WEBMANIFEST[] =
+"{\"name\":\"ESP32-SwitchBot\","
+"\"short_name\":\"SwitchBot\","
+"\"description\":\"Encrypted Physical Switch Actuator Dashboard\","
+"\"start_url\":\"/\","
+"\"scope\":\"/\","
+"\"display\":\"standalone\","
+"\"orientation\":\"portrait\","
+"\"background_color\":\"#000000\","
+"\"theme_color\":\"#000000\","
+"\"icons\":[{\"src\":\"/icon.svg\",\"sizes\":\"any\",\"type\":\"image/svg+xml\",\"purpose\":\"any maskable\"}]}";
+
+// Lightweight Service Worker: precaches static shell assets while keeping API calls network-live
+static const char SW_JS[] =
+"const C='sb-v2';"
+"const P=['/style.css?v=4','/app.js?v=5','/manifest.webmanifest','/icon.svg'];"
+"self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>c.addAll(P)).then(()=>self.skipWaiting()));});"
+"self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.map(n=>n!==C?caches.delete(n):null))).then(()=>self.clients.claim()));});"
+"self.addEventListener('fetch',e=>{"
+"var u=new URL(e.request.url);"
+"if(e.request.method!=='GET'||u.pathname.startsWith('/api/')||u.pathname==='/trigger'||u.pathname==='/reboot'||u.pathname==='/clear-logs'||u.pathname.startsWith('/ota/'))return;"
+"e.respondWith(caches.match(e.request).then(m=>m||fetch(e.request).then(r=>{"
+"if(r&&r.status===200&&r.type==='basic'){var c=r.clone();caches.open(C).then(s=>s.put(e.request,c));}"
+"return r;"
+"}).catch(()=>m)));"
+"});";
+
+// Shared CSS styling for all web pages (cyber-dark theme, responsive cards, and PWA mobile safe-areas)
 static const char COMMON_CSS[] =
 ":root{--bg:#000000;--surface:rgba(15,23,36,0.72);--surface-c:rgba(26,38,56,0.65);"
 "--surface-border:rgba(255,255,255,0.08);--primary:#8ab4f8;--primary-glow:rgba(138,180,248,0.25);"
@@ -19,10 +54,11 @@ static const char COMMON_CSS[] =
 "body{background-color:#000;background-image:radial-gradient(circle at 50% 0%,rgba(24,38,64,0.45) 0%,rgba(8,13,22,0.85) 65%,#000 100%);"
 "background-attachment:fixed;color:var(--on-surface);min-height:100%;min-height:100dvh;"
 "font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;"
-"display:flex;justify-content:center;align-items:flex-start;margin:0;padding:0;-webkit-tap-highlight-color:transparent;overflow-x:hidden;}"
-".wrap{width:100%;max-width:680px;padding:32px 20px 56px;min-height:100%;}"
-".wrap.centered{max-width:440px;width:100%;min-height:100dvh;padding:20px;"
+"display:flex;justify-content:center;align-items:flex-start;margin:0;padding:0;-webkit-tap-highlight-color:transparent;overflow-x:hidden;overscroll-behavior-y:none;}"
+".wrap{width:100%;max-width:680px;padding:max(32px,env(safe-area-inset-top,32px)) max(20px,env(safe-area-inset-right,20px)) max(56px,env(safe-area-inset-bottom,56px)) max(20px,env(safe-area-inset-left,20px));min-height:100%;}"
+".wrap.centered{max-width:440px;width:100%;min-height:100dvh;padding:max(20px,env(safe-area-inset-top,20px)) max(20px,env(safe-area-inset-right,20px)) max(20px,env(safe-area-inset-bottom,20px)) max(20px,env(safe-area-inset-left,20px));"
 "display:flex;flex-direction:column;justify-content:center;align-items:stretch;align-self:center;box-sizing:border-box;}"
+"button,.nav a,.card,.row,.log-item{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;}"
 "@media (min-width:768px){.wrap{max-width:760px;padding:48px 32px 64px;}.wrap.centered{max-width:460px;padding:32px;}}"
 "h1,h2{font-family:'Inter',sans-serif;font-weight:700;color:#f1f5f9;letter-spacing:-0.3px;margin:0 0 20px;text-align:center;}"
 "h1{font-size:24px;}"
@@ -148,8 +184,14 @@ static const char APP_JS[] =
 "if(el=document.getElementById('ram'))el.textContent=d.ru+'/'+d.rt+' KB';"
 "if(el=document.getElementById('clk'))el.textContent=d.c+' MHz';"
 "if(el=document.getElementById('servo-ago')){"
+"if(d.sc>0){"
 "if(d.sl>0&&d.st>=d.sl){el.textContent=__fmtAgo(d.st-d.sl);}"
+"else if(d.sl>0){el.textContent='Awaiting NTP Sync...';}"
+"else{el.textContent='Recent (Pre-NTP)';}"
+"}else{el.textContent='Never';}"
 "}"
+"if(el=document.getElementById('servo-src')){el.textContent=d.ss||'-';}"
+"if(el=document.getElementById('servo-count')){el.textContent=d.sc;}"
 "if(el=document.getElementById('ts-dur-val')){"
 "if(d.ts>0&&d.st>=d.ts){el.textContent=__fmtDur(d.st-d.ts);}"
 "}"
@@ -183,10 +225,10 @@ static const char APP_JS[] =
 "if(d.ts_cls==='on'&&d.ts_cs){r.style.display='';if(el=document.getElementById('ts-conn-time'))el.textContent=d.ts_cs;}"
 "else{r.style.display='none';}"
 "}"
-"}).catch(function(){}).finally(function(){__scheduleNext(3500);});"
+"}).catch(function(){}).finally(function(){__scheduleNext(4500);});"
 "}"
-"function __scheduleNext(ms){if(!document.hidden){clearTimeout(__poll);__poll=setTimeout(__pollTick,ms||3500);}}"
-"function __pollStart(){if(!document.getElementById('up')&&!document.getElementById('ram'))return;if(__poll)return;__scheduleNext(3500);}"
+"function __scheduleNext(ms){if(!document.hidden){clearTimeout(__poll);__poll=setTimeout(__pollTick,ms||4500);}}"
+"function __pollStart(){if(!document.getElementById('up')&&!document.getElementById('ram'))return;if(__poll)return;__scheduleNext(4500);}"
 "function __pollStop(){if(__poll){clearTimeout(__poll);__poll=null;}}"
 "document.addEventListener('visibilitychange',function(){if(document.hidden)__pollStop();else __pollStart();});"
 "function __showToast(msg){"
@@ -215,6 +257,10 @@ static const char APP_JS[] =
 "document.addEventListener('click',function(e){"
 "var b=e.target.closest('button,.nav a,a.back');"
 "if(b){"
+"if(b.classList.contains('primary')||b.getAttribute('href')==='/'){"
+"b.style.pointerEvents='none';"
+"b.style.opacity='0.6';"
+"}"
 "if(navigator.vibrate){"
 "if(b.classList.contains('primary')||b.getAttribute('href')==='/'){"
 "navigator.vibrate([35,15,45]);"
@@ -280,24 +326,30 @@ static const char APP_JS[] =
 "}"
 "function __initApp(){"
 "__initLogToggles();"
+"if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(function(){});}"
 "if(!document.hidden)__pollStart();"
 "}"
 "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',__initApp);}"
 "else{__initApp();}";
 
-// Wraps an HTML body with standard page header linking to cached CSS and JS
+// Wraps an HTML body with standard page header linking to cached CSS, JS, and PWA manifest
 inline String wrapPage(const char* title, const char* icon, const char* bodyHtml, const char* extraScript = "", bool centered = false) {
   String out;
-  out.reserve(strlen(bodyHtml) + (extraScript ? strlen(extraScript) : 0) + 600);
-  out += "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'><title>";
+  out.reserve(strlen(bodyHtml) + (extraScript ? strlen(extraScript) : 0) + 1024);
+  out += "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'>";
+  out += "<meta name='theme-color' content='#000000'><meta name='color-scheme' content='dark'>";
+  out += "<meta name='mobile-web-app-capable' content='yes'><meta name='apple-mobile-web-app-capable' content='yes'>";
+  out += "<meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'><meta name='apple-mobile-web-app-title' content='SwitchBot'>";
+  out += "<link rel='manifest' href='/manifest.webmanifest'>";
+  out += "<link rel='apple-touch-icon' href='/icon.svg'>";
+  out += "<link rel='icon' href='/icon.svg' type='image/svg+xml'>";
+  out += "<title>";
   out += title;
-  out += "</title><link rel='icon' href='data:image/svg+xml,%3Csvg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"%3E%3Ctext y=\".9em\" font-size=\"90\"%3E";
-  out += icon;
-  out += "%3C/text%3E%3C/svg%3E'>";
+  out += "</title>";
   if (enableOnlineFonts) {
     out += "<link rel='stylesheet' href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap'>";
   }
-  out += "<link rel='stylesheet' href='/style.css?v=3'><script defer src='/app.js?v=3'></script>";
+  out += "<link rel='stylesheet' href='/style.css?v=4'><script defer src='/app.js?v=5'></script>";
   out += "</head><body><div class='wrap";
   if (centered) out += " centered";
   out += "'>";
@@ -315,13 +367,19 @@ inline void sendWrappedPageStream(WebServer &server, const char* title, const ch
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.send(200, "text/html; charset=utf-8", "");
 
-  char headBuf[600];
+  char headBuf[1024];
   snprintf(headBuf, sizeof(headBuf),
-    "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'><title>%s</title>"
-    "<link rel='icon' href='data:image/svg+xml,%%3Csvg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"%%3E%%3Ctext y=\".9em\" font-size=\"90\"%%3E%s%%3C/text%%3E%%3C/svg%%3E'>"
+    "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'>"
+    "<meta name='theme-color' content='#000000'><meta name='color-scheme' content='dark'>"
+    "<meta name='mobile-web-app-capable' content='yes'><meta name='apple-mobile-web-app-capable' content='yes'>"
+    "<meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'><meta name='apple-mobile-web-app-title' content='SwitchBot'>"
+    "<link rel='manifest' href='/manifest.webmanifest'>"
+    "<link rel='apple-touch-icon' href='/icon.svg'>"
+    "<link rel='icon' href='/icon.svg' type='image/svg+xml'>"
+    "<title>%s</title>"
     "%s"
-    "<link rel='stylesheet' href='/style.css?v=3'><script defer src='/app.js?v=3'></script></head><body><div class='wrap%s'>",
-    title, icon,
+    "<link rel='stylesheet' href='/style.css?v=4'><script defer src='/app.js?v=5'></script></head><body><div class='wrap%s'>",
+    title,
     enableOnlineFonts ? "<link rel='stylesheet' href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap'>" : "",
     centered ? " centered" : ""
   );
