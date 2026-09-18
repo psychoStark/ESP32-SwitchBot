@@ -87,4 +87,10 @@ v1.2
   - updated docs/interfaces/web-dashboard.md with 20s watchdog, v1.2 debug preview footer, and PWA Add to Home Screen guide
   - updated docs/guide/configuration.md with exact main.cpp line numbers, 255.255.0.0 (/16) subnet mask, and 4s cooldown
   - updated VitePress favicon to ⚡ SVG emoji in docs/.vitepress/config.mts
+- optimized Android and iOS PWA installation compatibility
+  - added embedded 192x192 PNG icon array (ICON_192_PNG, 400 bytes) with ⚡ symbol for Android WebAPK minting requirements
+  - registered /icon-192.png and /icon-512.png HTTP routes with 7-day browser caching
+  - updated /apple-touch-icon.png to serve real PNG icon for iOS Safari home screen bookmarking
+  - declared separate 'any' and 'maskable' purpose PNG icon definitions and explicit id in Web App Manifest (/manifest.webmanifest)
+  - added PNG icons to Service Worker precache list (/sw.js) with cache version bump to sb-v3
 

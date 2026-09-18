@@ -2487,10 +2487,20 @@ void setup() {
     server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
     server.send_P(200, "image/svg+xml", ICON_SVG);
   });
+  server.on("/icon-192.png", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
+    server.send_P(200, "image/png", (const char*)ICON_192_PNG, ICON_192_PNG_LEN);
+  });
+  server.on("/icon-512.png", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
+    server.send_P(200, "image/png", (const char*)ICON_192_PNG, ICON_192_PNG_LEN);
+  });
   server.on("/apple-touch-icon.png", HTTP_GET, []() {
     server.sendHeader("Connection", "close");
     server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
-    server.send_P(200, "image/svg+xml", ICON_SVG);
+    server.send_P(200, "image/png", (const char*)ICON_192_PNG, ICON_192_PNG_LEN);
   });
   server.on("/favicon.ico", HTTP_GET, []() {
     server.sendHeader("Connection", "close");
