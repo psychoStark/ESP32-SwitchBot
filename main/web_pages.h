@@ -50,8 +50,8 @@ static const char MANIFEST_WEBMANIFEST[] =
 "{\"name\":\"ESP32-SwitchBot\","
 "\"short_name\":\"SwitchBot\","
 "\"description\":\"Encrypted Physical Switch Actuator Dashboard\","
-"\"id\":\"/\","
-"\"start_url\":\"/\","
+"\"id\":\"/main\","
+"\"start_url\":\"/main\","
 "\"scope\":\"/\","
 "\"display\":\"standalone\","
 "\"orientation\":\"portrait\","
@@ -65,19 +65,11 @@ static const char MANIFEST_WEBMANIFEST[] =
 "{\"src\":\"/icon.svg\",\"sizes\":\"any\",\"type\":\"image/svg+xml\",\"purpose\":\"any\"}"
 "]}";
 
-// Lightweight Service Worker: precaches static shell assets while keeping API calls network-live
+// Self-destructing cleanup worker: purges any legacy offline caches and unregisters itself to enforce live network actuation
 static const char SW_JS[] =
-"const C='sb-v3';"
-"const P=['/style.css?v=4','/app.js?v=5','/manifest.webmanifest','/icon.svg','/icon-192.png','/icon-512.png'];"
-"self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>c.addAll(P)).then(()=>self.skipWaiting()));});"
-"self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.map(n=>n!==C?caches.delete(n):null))).then(()=>self.clients.claim()));});"
-"self.addEventListener('fetch',e=>{"
-"var u=new URL(e.request.url);"
-"if(e.request.method!=='GET'||u.pathname.startsWith('/api/')||u.pathname==='/trigger'||u.pathname==='/reboot'||u.pathname==='/clear-logs'||u.pathname.startsWith('/ota/'))return;"
-"e.respondWith(caches.match(e.request).then(m=>m||fetch(e.request).then(r=>{"
-"if(r&&r.status===200&&r.type==='basic'){var c=r.clone();caches.open(C).then(s=>s.put(e.request,c));}"
-"return r;"
-"}).catch(()=>m)));"
+"self.addEventListener('install',function(){self.skipWaiting();});"
+"self.addEventListener('activate',function(e){"
+"e.waitUntil(caches.keys().then(function(k){return Promise.all(k.map(function(n){return caches.delete(n);}));}).then(function(){return self.clients.claim();}).then(function(){return self.registration.unregister();}));"
 "});";
 
 // Shared CSS styling for all web pages (cyber-dark theme, responsive cards, and PWA mobile safe-areas)
@@ -363,7 +355,12 @@ static const char APP_JS[] =
 "}"
 "function __initApp(){"
 "__initLogToggles();"
-"if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(function(){});}"
+"if('serviceWorker' in navigator){"
+"navigator.serviceWorker.getRegistrations().then(function(rs){for(var i=0;i<rs.length;i++)rs[i].unregister();});"
+"}"
+"if('caches' in window){"
+"caches.keys().then(function(ks){for(var i=0;i<ks.length;i++)caches.delete(ks[i]);});"
+"}"
 "if(!document.hidden)__pollStart();"
 "}"
 "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',__initApp);}"
@@ -387,7 +384,7 @@ inline String wrapPage(const char* title, const char* icon, const char* bodyHtml
   if (enableOnlineFonts) {
     out += "<link rel='stylesheet' href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap'>";
   }
-  out += "<link rel='stylesheet' href='/style.css?v=4'><script defer src='/app.js?v=5'></script>";
+  out += "<link rel='stylesheet' href='/style.css?v=5'><script defer src='/app.js?v=6'></script>";
   out += "</head><body><div class='wrap";
   if (centered) out += " centered";
   out += "'>";
@@ -402,6 +399,9 @@ inline String wrapPage(const char* title, const char* icon, const char* bodyHtml
 template <typename F>
 inline void sendWrappedPageStream(WebServer &server, const char* title, const char* icon, F bodyWriter, const char* extraScript = "", bool centered = false) {
   server.sendHeader("Connection", "close");
+  server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  server.sendHeader("Pragma", "no-cache");
+  server.sendHeader("Expires", "0");
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.send(200, "text/html; charset=utf-8", "");
 
@@ -417,7 +417,7 @@ inline void sendWrappedPageStream(WebServer &server, const char* title, const ch
     "<link rel='apple-touch-icon' href='/apple-touch-icon.png'>"
     "<title>%s</title>"
     "%s"
-    "<link rel='stylesheet' href='/style.css?v=4'><script defer src='/app.js?v=5'></script></head><body><div class='wrap%s'>",
+    "<link rel='stylesheet' href='/style.css?v=5'><script defer src='/app.js?v=6'></script></head><body><div class='wrap%s'>",
     title,
     enableOnlineFonts ? "<link rel='stylesheet' href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap'>" : "",
     centered ? " centered" : ""

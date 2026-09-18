@@ -232,7 +232,7 @@ Traditional firmware models poll the Arduino `loop()` continuously with `vTaskDe
 ### 4. Cross-Platform Progressive Web App (PWA) Engine
 * **Standalone Installability:** Exposes `/manifest.webmanifest` defining `display: standalone`, `orientation: portrait`, and cyber-dark theme colors (`#000000`), allowing users on iOS, Android, and Desktop (Chrome/Edge) to install the SwitchBot dashboard directly to their home screen or app launcher without an app store.
 * **⚡ Native Emoji Vector Icon:** Serves an ultra-crisp SVG icon (`/icon.svg`) and Apple Touch icon (`/apple-touch-icon.png`) leveraging the `⚡` lightning bolt symbol. Also serves `/favicon.ico` with long-term caching to eliminate 404 connection storms.
-* **Precaching Service Worker (`/sw.js`):** Intercepts shell requests to deliver cached CSS, JS, and manifest instantly while keeping dynamic endpoints (`/api/*`, `/trigger`, `/ota/*`, `/reboot`) strictly network-direct.
+* **Network-Direct Execution (Zero Offline Simulation):** Because ESP32-SwitchBot is a physical hardware actuator, simulated offline caching is strictly prohibited. All control requests, live telemetry (`/api/live`), and dynamic dashboards operate network-direct with strict `Cache-Control: no-cache, no-store, must-revalidate` headers. A self-destructing cleanup worker purges any legacy browser caches so the user interface always reflects real-time physical device state.
 * **Mobile Viewport & Safe Area Optimization:** Features `viewport-fit=cover`, safe-area padding (`env(safe-area-inset-top)` / `env(safe-area-inset-bottom)`), `overscroll-behavior-y: none;` to suppress pull-to-refresh jitter in standalone mode, and touch callout isolation.
 
 ---

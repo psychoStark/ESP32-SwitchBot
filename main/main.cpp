@@ -1155,6 +1155,7 @@ void handleRoot() {
     char out[192];
     snprintf(out, sizeof(out), "\n[+] SUCCESS: Servo tap queued.\n[i] ESP Uptime: %s\n\n", upBuf);
     server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server.send(200, "text/plain; charset=utf-8", out);
   } else {
     char body[320];
@@ -1176,6 +1177,7 @@ void handleMain() {
     if (host.length() == 0) host = "esp32.local";
     String script = generateCurlDashboardScript(host, OTA_KEY);
     server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server.send(200, "text/plain; charset=utf-8", script);
   } else {
     String primaryAction = isCalibrated
@@ -1489,6 +1491,9 @@ void handleApiLive() {
     FIRMWARE_VERSION);
   
   server.sendHeader("Connection", "close");
+  server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  server.sendHeader("Pragma", "no-cache");
+  server.sendHeader("Expires", "0");
   server.send(200, "application/json", json);
 }
 
@@ -2129,6 +2134,7 @@ void handleClearLogs() {
     String page = wrapPage("Logs Cleared", "&#128465;", body,
       "<script>setTimeout(function(){window.location.href='/debug';},2000);</script>", true);
     server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server.send(200, "text/html; charset=utf-8", page);
   }
 }
@@ -2136,6 +2142,7 @@ void handleClearLogs() {
 void handleReboot() {
   if (isCurl()) {
     server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server.send(200, "text/plain; charset=utf-8", "\n[ SYSTEM ] Rebooting ESP32 now...\n\n");
   } else {
     const char* body =
@@ -2147,6 +2154,7 @@ void handleReboot() {
     String page = wrapPage("Rebooting...", "&#128260;", body,
       "<script>setTimeout(function(){window.location.href='/main';},5000);</script>", true);
     server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server.send(200, "text/html; charset=utf-8", page);
   }
   delay(500);
@@ -2479,7 +2487,9 @@ void setup() {
   });
   server.on("/sw.js", HTTP_GET, []() {
     server.sendHeader("Connection", "close");
-    server.sendHeader("Cache-Control", "no-cache");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server.sendHeader("Pragma", "no-cache");
+    server.sendHeader("Expires", "0");
     server.send_P(200, "application/javascript; charset=utf-8", SW_JS);
   });
   server.on("/icon.svg", HTTP_GET, []() {

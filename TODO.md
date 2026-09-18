@@ -25,7 +25,7 @@
         - documented zero-jitter task priority 5 elevation during servo actuation in FreeRTOS concurrency section
     - [x] optimize webserver for pwa accross platforms
         - added /manifest.webmanifest with standalone display mode, portrait orientation, and cyber-dark theme colors
-        - implemented precaching Service Worker (/sw.js) for instant offline shell delivery while preserving network-direct API calls
+        - implemented self-destructing cleanup worker and network-direct execution with no-cache headers to prevent stale offline caching
         - served native ⚡ emoji SVG icon (/icon.svg), apple-touch-icon.png, and favicon.ico with 7-day browser caching
         - injected mobile PWA meta tags, apple-mobile-web-app-capable, and apple-mobile-web-app-status-bar-style in wrapPage and sendWrappedPageStream
         - added mobile safe-area insets padding and overscroll-behavior-y: none to prevent standalone window rubber-banding

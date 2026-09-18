@@ -93,4 +93,10 @@ v1.2
   - updated /apple-touch-icon.png to serve real PNG icon for iOS Safari home screen bookmarking
   - declared separate 'any' and 'maskable' purpose PNG icon definitions and explicit id in Web App Manifest (/manifest.webmanifest)
   - added PNG icons to Service Worker precache list (/sw.js) with cache version bump to sb-v3
+- fixed PWA offline caching bug and enforced strict live network actuation
+  - corrected Web App Manifest start_url and id from '/' to '/main' to prevent accidental servo triggering or landing on success page on app launch
+  - replaced precaching Service Worker with self-destructing cleanup worker that purges all legacy CacheStorage caches and unregisters itself
+  - updated APP_JS to unregister any active service workers and clear CacheStorage on load
+  - added Cache-Control: no-cache, no-store, must-revalidate headers across sendWrappedPageStream, handleRoot, handleMain, handleApiLive, handleClearLogs, and handleReboot
+  - bumped client asset versions to style.css?v=5 and app.js?v=6 to ensure immediate browser invalidation
 
