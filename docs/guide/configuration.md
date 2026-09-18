@@ -105,16 +105,18 @@ The following parameters are located in [`main/main.cpp`](file:///Users/psychost
 
 | Parameter | Location | Default Value | Description |
 | :--- | :--- | :--- | :--- |
-| `BOARD_NAME` | `main.cpp:56` | `""` | Optional manual hardware model override. |
-| `TIMEZONE_OFFSET` | `main.cpp:51` | `"+05:30"` | Timezone offset for NTP synchronization (supports `+05:30`, `-05:00`, `0530`, `0`). |
+| `BOARD_NAME` | `main.cpp:59` | `""` | Optional manual hardware model override. |
+| `TIMEZONE_OFFSET` | `main.cpp:54` | `"+05:30"` | Timezone offset for NTP synchronization (supports `+05:30`, `-05:00`, `0530`, `0`). |
 | `WIFI_SSID_1..6` | `secrets.h` | `""` | Up to 6 configured Wi-Fi network SSIDs for automatic failover. |
 | `WIFI_PASSWORD_1..6`| `secrets.h` | `""` | Corresponding Wi-Fi WPA2 passwords. |
-| `local_IP` | `main.cpp:108` | `192.168.1.50` | Static IP of the ESP32 on the local Wi-Fi subnet. |
-| `gateway` | `main.cpp:109` | `192.168.1.1` | Default router gateway IP address. |
-| `subnet` | `main.cpp:110` | `255.255.255.0`| Subnet mask (`/24`). |
-| `tailscaleAdvertiseRoute` | `main.cpp:116` | `"192.168.1.0/24"` | CIDR advertised to Tailnet for high-availability subnet failover. |
-| `servoPin` | `main.cpp:123` | `1` | Output GPIO connected to servo PWM line. |
-| `PRESS_COOLDOWN_MS` | `main.cpp:186` | `2000` (2s) | Cooldown interval between successive button pushes to protect the motor. |
-| `HEARTBEAT_INTERVAL_MS` | `main.cpp:179` | `60000` (60s) | NVS timestamp write interval for safe flash wear-leveling. |
-| `OTA_AUTO_TIMEOUT_MS` | `main.cpp:176` | `600000` (10m) | Inactivity auto-close timer for port 3232 after being unlocked. |
+| `local_IP` | `main.cpp:129` | `192.168.1.50` | Static IP of the ESP32 on the local Wi-Fi subnet. |
+| `gateway` | `main.cpp:130` | `192.168.1.1` | Default router gateway IP address. |
+| `subnet` | `main.cpp:131` | `255.255.0.0`| Subnet mask (`/16`). Allows communication with both `/24` home routers and Windows Hotspots (`192.168.137.x`). |
+| `tailscaleAdvertiseRoute` | `main.cpp:140` | `"192.168.1.0/24"` | CIDR advertised to Tailnet for high-availability subnet failover. |
+| `servoPin` | `main.cpp:147` | `1` | Output GPIO connected to servo PWM line. |
+| `MAX_HOLD_DURATION_MS` | `main.cpp:162` | `20000` (20s) | Calibration manual hold safety watchdog; auto-returns arm to rest to protect motor. |
+| `OTA_AUTO_TIMEOUT_MS` | `main.cpp:200` | `600000` (10m) | Inactivity auto-close timer for port 3232 after being unlocked. |
+| `HEARTBEAT_INTERVAL_MS` | `main.cpp:203` | `60000` (60s) | NVS timestamp write interval for safe flash wear-leveling. |
+| `PRESS_COOLDOWN_MS` | `main.cpp:210` | `4000` (4s) | Cooldown interval between successive button pushes to protect the motor. |
+| `FIRMWARE_VERSION` | `main.cpp:2596`| `"1.2"` | Monospace firmware version string streamed across dashboards and telemetry. |
 | `OTA_KEY` | `secrets.h` | `""` | Passphrase to authenticate Over-The-Air updates. |

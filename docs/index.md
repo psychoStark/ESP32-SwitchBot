@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "ESP32-SwitchBot"
   text: "Encrypted Physical Switch Actuator"
-  tagline: "Industrial-grade actuator firmware with zero-app Web UI, interactive terminal cURL TUI, and embedded Tailscale VPN mesh failover."
+  tagline: "Industrial-grade DIY switch actuator & fingerbot with cross-platform PWA, interactive terminal cURL TUI, and embedded Tailscale WireGuard VPN for turning on PCs and appliances from anywhere in the world."
   actions:
     - theme: brand
       text: Get Started
@@ -17,24 +17,24 @@ hero:
       link: /interfaces/rest-api
 
 features:
-  - icon: 📱
-    title: Zero-App Web & Terminal UI
-    details: Instant access from any browser (phone, PC, tablet) or any terminal via a single <code>curl</code> command. No proprietary mobile apps or third-party cloud bridges required.
-  - icon: ❄️
-    title: Ice-Cold Thermals (~40°C)
-    details: Downclocked to 80 MHz CPU frequency with FreeRTOS tickless idle sleep. Operates at a whisper-quiet ~0.14 W without generating heat.
-  - icon: 🛡️
-    title: Dual-Core FreeRTOS Segregation
-    details: Network I/O and web serving run on Core 0, while physical servo actuation and the responsive loop run on Core 1 for sub-5ms instant triggering.
+  - icon: ⚡
+    title: Standalone PWA & Offline Precaching
+    details: Install directly to your iPhone, Android, or Desktop home screen. Powered by a service worker with instant cached shell delivery and native safe-area notch padding.
+  - icon: 💻
+    title: Interactive Terminal cURL TUI
+    details: Stream a full-screen interactive Bash dashboard directly inside your terminal with a single <code>curl</code> command. Zero client software required.
   - icon: 🌐
     title: Embedded Tailscale & HA Failover
-    details: Access from anywhere on Earth via WireGuard mesh VPN. Features automatic cold standby when a primary subnet router is alive to save power.
-  - icon: 🔄
-    title: Multi-Network Wi-Fi Cycling
-    details: Configurable for up to 6 Wi-Fi networks with exponential backoff and ARP keepalives to prevent disconnects during modem sleep.
+    details: Access from anywhere on Earth via WireGuard mesh VPN without port forwarding. Automatic cold standby saves power when a primary subnet router is alive.
+  - icon: 🛡️
+    title: Dual-Core FreeRTOS Segregation
+    details: Network I/O runs on Core 0 while physical servo actuation runs on Core 1 with task priority elevation (priority 5) for sub-5ms jitter-free motor timing.
+  - icon: ❄️
+    title: Ice-Cold Thermals (~40°C)
+    details: Downclocked to 80 MHz CPU frequency with FreeRTOS tickless idle sleep. Operates at a whisper-quiet ~0.14 W without generating heat inside switch housings.
   - icon: ⚙️
     title: Interactive SVG Calibration
-    details: Touch-friendly rotary dials with 40° bottom deadzones, live motor preview, test taps, and a 10-second safety watchdog on manual holds.
+    details: Touch-friendly rotary dials with 40° bottom deadzones, live motor preview, test taps, and a 20-second safety watchdog on manual holds.
 ---
 
 <div class="home-release-banner">

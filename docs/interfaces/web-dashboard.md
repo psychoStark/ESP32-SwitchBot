@@ -79,7 +79,7 @@ Fine-tuning servo positions is performed through dual rotary dials with real-tim
 ### Key Safety Protections:
 * **Live Rest Preview:** Dragging the Rest dial debounces live `POST /api/calibrate/move?angle=...` updates so you can visually confirm clearance before saving.
 * **Bottom-Gap Barrier:** The rotary gesture engine enforces a 40° bottom deadzone, preventing accidental 0° ↔ 180° flip wraps.
-* **10-Second Auto-Release Guard:** Pressing the **Hold** button commands the servo to the press depth. If held longer than 10,000ms (or if the browser tab disconnects), the firmware safety watchdog automatically springs the servo back to rest to protect the motor from burnout.
+* **20-Second Auto-Release Guard:** Pressing the **Hold** button commands the servo to the press depth. If held longer than 20,000ms (or if the browser tab disconnects), the firmware safety watchdog automatically springs the servo back to rest to protect the motor from burnout.
 
 ---
 
@@ -194,6 +194,7 @@ The debug screen gives real-time visibility into past reboots, servo actuation h
         <button class="warn" type="button" style="flex:1;">🗑 Clear Logs</button>
       </div>
       <a class="back" href="javascript:void(0)">← Back to Dashboard</a>
+      <div style="text-align:center;margin-top:20px;font-size:11px;color:var(--on-surface-v);" class="mono">v1.2</div>
     </div>
   </div>
 </BrowserWindow>
@@ -206,3 +207,13 @@ To preserve battery life on both client devices and the ESP32:
 * Live polling against `/api/live` listens to the HTML5 Page Visibility API (`document.hidden`).
 * When the user locks their smartphone or switches browser tabs, polling **instantly halts**.
 * Polling resumes automatically the millisecond the tab returns to the foreground.
+
+---
+
+## 6. Progressive Web App (PWA) & Add to Home Screen
+
+The dashboard is a fully optimized Progressive Web App:
+* **iOS Safari:** Tap the **Share** button $\rightarrow$ select **"Add to Home Screen"**. The app opens in an edge-to-edge standalone window with full support for safe-area notch and home indicator cutouts.
+* **Android Chrome:** Tap the three dots menu $\rightarrow$ tap **"Install App"** (or click the automatic install prompt).
+* **Desktop (Chrome / Edge):** Click the install icon in the URL bar to run SwitchBot in its own native app window.
+* **Offline Precaching:** Powered by `/sw.js`, core UI styles, scripts, and vector `⚡` icons load instantly from local browser cache.

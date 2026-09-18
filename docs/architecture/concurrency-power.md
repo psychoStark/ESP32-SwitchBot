@@ -31,8 +31,9 @@ The ESP32-S3 contains two Xtensa LX7 processor cores. Network operations and act
 * **`ts_watchdog` Task (Priority 1):** Performs periodic HTTPS calls to `api.tailscale.com` in the background. Because it is completely decoupled from Core 1, blocking TLS handshakes **never** cause servo actuation lag.
 
 ### 2. Core 1: Control Loop & Servo Actuation
-* **`arduino_loop` Task (Priority 1):** Manages physical actuator movements, NTP clock sync, Wi-Fi failover checks, and flash heartbeats.
+* **`arduino_loop` Task (Priority 1):** Manages physical actuator movements, NTP clock sync, Wi-Fi failover checks, 10-second Gratuitous ARP keepalives, and flash heartbeats.
 * **Asynchronous Actuation:** When `/trigger` is called on Core 0, it signals Core 1 via FreeRTOS task notification (`xTaskNotifyGive(loopTaskHandle)`), responding to the client in < 5ms before the mechanical stroke completes.
+* **Zero-Jitter Priority Elevation:** During physical stroke execution (`triggerPress()`), the task priority is dynamically elevated to priority 5 (above the `http_srv` task's priority 4), guaranteeing rock-solid hardware PWM timing free from network thread interruptions.
 
 ---
 

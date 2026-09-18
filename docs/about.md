@@ -12,13 +12,19 @@ Version **v1.2** builds directly upon the v1.0 production baseline, focusing on 
 
 * **Dynamic Hardware Model Detection:** Replaced static chip model strings with native ESP-IDF heap capabilities (`heap_caps_get_total_size(MALLOC_CAP_SPIRAM)`), automatically detecting and formatting exact board hardware (e.g. `ESP32-S3-N16R8`, `ESP32-N4`).
 * **In-Code Board Override (`BOARD_NAME`):** Added `#define BOARD_NAME ""` in `main/main.cpp` for instant manual overrides without touching sensitive credentials or rerunning setup tools.
-* **Multi-Network Wi-Fi Failover (Up to 6 Networks):** Expanded Wi-Fi subsystem to cycle through up to 6 configured Wi-Fi network profiles (`WIFI_SSID_1..6`) with exponential reconnect backoff and L2 Gratuitous ARP keepalives.
-* **Full-Stream Calibration JS Delivery:** Eliminated static buffer clipping in `sendWrappedPageStream`, directly streaming the complete ~8 KB JavaScript payload for responsive touch dials, linear sliders, live tests, and save actions.
-* **Servo Motor Burnout Watchdog:** Implemented an active 10,000ms safety watchdog on manual calibration holds (`/api/calibrate/hold`). If a client disconnects or holds the motor down, the firmware automatically springs the arm back to rest.
-* **Dedicated Watchdog Task (`ts_watchdog`):** Offloaded periodic HTTPS calls to `api.tailscale.com` into a dedicated Core 0 FreeRTOS background task. Blocking TLS handshakes never delay `loop()` or physical servo triggering on Core 1.
-* **Multi-Network Host OTA Routing (`-I <lan_ip>`):** Resolved reverse connection broken pipes on host machines running Tailscale, Docker, or VPN tunnels by documenting explicit `-I <lan_ip>` binding for `espota.py`.
-* **Battery-Saving Page Visibility:** Live telemetry polling against `/api/live` now listens to `document.hidden`, immediately halting background network requests when phone screens lock or tabs switch.
-* **Long-Term Browser Caching:** Configured HTTP headers (`Cache-Control: public, max-age=604800, immutable`) for `/style.css` and `/app.js`, reducing repeat visits to 0 KB.
+* **Multi-Network Wi-Fi Failover (Up to 6 Networks):** Expanded Wi-Fi subsystem to cycle through up to 6 configured Wi-Fi network profiles (`WIFI_SSID_1..6`) with dynamic DHCP fallback for secondary networks.
+* **Broadened Subnet Mask (`255.255.0.0` /16):** Broadened local subnet mask to `/16` to enable direct, seamless bidirectional communication with Windows Hotspot and Internet Connection Sharing (ICS) clients (`192.168.137.x`).
+* **WireGuard Inbound Local Packet Remapping:** Enhanced `wireguardif.c` (`tcpip_input`) to directly map incoming decrypted Tailscale packets destined for `192.168.1.50` into the local lwIP stack, eliminating dropped packets.
+* **Zero-Lag Actuation Priority Elevation:** Added FreeRTOS task priority elevation (priority 5) during `triggerPress()` to guarantee zero-jitter hardware PWM timing regardless of heavy network traffic.
+* **Servo Motor Burnout Watchdog (20s):** Implemented an active 20,000ms safety watchdog on manual calibration holds (`/api/calibrate/hold`). If a client disconnects or holds the motor down, the firmware automatically springs the arm back to rest.
+* **4-Second Press Cooldown & Click Debounce:** Increased `PRESS_COOLDOWN_MS` to 4s and added client-side pointer-event guards to reject accidental multi-clicks and browser speculative retries.
+* **Non-Blocking Boot Standby:** Eliminated ~74s boot stalls by guarding startup Tailscale checks with Wi-Fi association state and backgrounding association timing (`wifi_connect_ms`).
+* **Accelerated L2 ARP Keepalive (10s):** Broadcasts Gratuitous ARP and Gateway ARP probes every 10s (plus startup/reconnect pulses) to prevent router connection drops during modem sleep.
+* **Full-Stream Web Delivery & Battery-Saving Polling:** Streamed JavaScript directly with `sendWrappedPageStream`, tuned live polling to 4.5s, and halted polling when the tab is hidden (`document.hidden`).
+* **Dynamic Servo Card Telemetry:** Rendered the debug Servo telemetry card permanently and added live DOM updates for trigger age, source ("cURL" vs "Web"), and total counts.
+* **Firmware Version Display:** Monospace `v1.2` footer on `/debug`, cURL terminal view, and `/api/live` telemetry.
+* **Cross-Platform Progressive Web App (PWA):** Standalone installable PWA for iOS, Android, and Desktop with `/manifest.webmanifest`, precaching Service Worker (`/sw.js`), native `⚡` SVG icon, and safe-area notch padding.
+* **Long-Term Browser Caching:** Configured HTTP headers (`Cache-Control: public, max-age=604800, immutable`) for `/style.css`, `/app.js`, `/manifest.webmanifest`, and `/icon.svg`.
 
 ---
 
