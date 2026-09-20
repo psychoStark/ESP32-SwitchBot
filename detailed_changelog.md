@@ -107,3 +107,6 @@ v1.2
   - retained natural semantic keyword density through the problem-solving and comparison guide
 - added `*.code-workspace` to `.gitignore`
   - prevented local IDE workspace files from polluting git status
+- synchronized simplified v1.2 release notes on documentation website
+  - structured docs/about.md into clean categories (Actuation & Reliability, Networking & WireGuard, Web Dashboard & PWA)
+  - condensed low-level changelog points into user-facing release notes
