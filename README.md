@@ -1,5 +1,7 @@
 # DIY ESP32-SwitchBot: Remote Physical Button Pusher & PC Power Switch with Embedded Tailscale VPN
 
+[![Documentation Website & Guide](https://img.shields.io/badge/Documentation-Official_Website_%26_Guide-2563EB.png?style=for-the-badge&logo=gitbook&logoColor=white)](https://psychostark.github.io/ESP32-SwitchBot/)
+
 > **An industrial-grade, open-source mechanical switch actuator and DIY fingerbot.** Physically pushes buttons (PC power buttons, wall switches, light toggles, coffee makers, or appliances) on command. Control it locally over your home Wi-Fi or remotely from anywhere in the world via **embedded Tailscale WireGuard VPN** — without port forwarding, dynamic DNS, or third-party cloud subscriptions.
 
 The device features three zero-software interfaces:
@@ -248,22 +250,13 @@ If you have ever tried to automate turning on your PC or appliances remotely, yo
 * Compatible with standard TowerPro SG90 and MG90S metal gear micro servos.
 * Compatible with standard open-source 3D printed switchbot mounts and mechanical button pusher STL files available on Printables and Thingiverse (search: *3D printed switchbot servo mount*, *SG90 mechanical button presser*, or *DIY fingerbot*).
 
----
-
-## 🔍 Search & Discovery Index
-
-This project was built to address common automation searches and challenges:
-- **DIY SwitchBot & Fingerbot:** *diy switchbot, automatic switch, automatic switch with mobile control, how to make a switchbot, how to make a remote switchbot, diy fingerbot esp32, 3d printed switchbot servo mount, esp32 sg90 mechanical button presser, servo switch presser 3d print, micro servo push power button pc, solenoid button pusher esp8266, diy physical button pusher remote control.*
-- **Remote PC Power & WoL Alternatives:** *turn my pc on remotely, how to turn on my pc from anywhere, how to turn on my pc from anywhere in the world, switchbot which can be triggered remotely, switchbot which can be triggered from anywhere, wake on lan over internet without port forwarding, wol over tailscale, raspberry pi wake on lan tailscale, esp32 wake on lan packet sender remote, bios ac power loss restart smart plug, restore on ac power loss sonoff pc turn on.*
-- **Hardware Modification Alternatives:** *esp32 motherboard power switch header relay, optocoupler pc power button pins, diy smart power button optocoupler esp32, turn on pc via motherboard front panel pins esp8266.*
-- **Tailscale & WireGuard IoT:** *esp with tailscale, tailscale on esp32, switchbot with tailscale, diy switchbot with tailscale, control my esp32 from anywhere, esp32 wireguard client remote trigger, zerotier esp32 alternative, cloudflared tunnel esp32 web server.*
-- **Firmware & Framework Alternatives:** *switchbot without esphome, esphome alternative, tasmota web switch remote trigger, tasmota servo button pusher, blynk esp32 remote button pusher, sinric pro esp32 pc power switch, mqtt broker control esp32 from anywhere, arduino ide esp32 remote web server, esp32 webhook push notification trigger, home assistant remote switchbot zigbee.*
 
 ---
 
 ## Detailed Documentation
 
-For detailed technical documentation on how the system works under the hood, see [documentation.md](documentation.md).
+* **Official Documentation & Guides:** [psychostark.github.io/ESP32-SwitchBot](https://psychostark.github.io/ESP32-SwitchBot/)
+* **Firmware Architecture Deep-Dive:** [documentation.md](documentation.md)
 
 ---
 

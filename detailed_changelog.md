@@ -99,4 +99,11 @@ v1.2
   - updated APP_JS to unregister any active service workers and clear CacheStorage on load
   - added Cache-Control: no-cache, no-store, must-revalidate headers across sendWrappedPageStream, handleRoot, handleMain, handleApiLive, handleClearLogs, and handleReboot
   - bumped client asset versions to style.css?v=5 and app.js?v=6 to ensure immediate browser invalidation
-
+- added documentation website PNG button to README.md
+  - added high-visibility Shields.io PNG badge button at the top of README.md linking to https://psychostark.github.io/ESP32-SwitchBot/
+  - updated Detailed Documentation section to link directly to the official documentation website and firmware architecture deep-dive
+- removed artificial Search & Discovery Index keyword block from README.md
+  - eliminated raw comma-separated keyword stuffing to keep README clean and avoid modern search engine de-ranking
+  - retained natural semantic keyword density through the problem-solving and comparison guide
+- added `*.code-workspace` to `.gitignore`
+  - prevented local IDE workspace files from polluting git status
