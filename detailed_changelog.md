@@ -1,0 +1,112 @@
+# Detailed Changelog
+
+---
+v1.2
+--
+
+- fixed Wi-Fi auto-reconnect logic in checkWifiReconnectIfNeeded
+  - removed single network bypass that prevented auto-reconnect when only one SSID was configured
+  - added 8-second disconnect monitor to force reconnect attempts
+  - added dynamic DHCP fallback when switching to secondary or hotspot networks while preserving static IP on primary network
+- enhanced ARP and network presence keepalive
+  - reduced periodic Gratuitous ARP and gateway probe interval from 45s to 15s
+  - added immediate Gratuitous ARP announcement upon initial Wi-Fi connection and each successful reconnection
+- broadened local subnet mask and network compatibility
+  - updated default subnet mask to 255.255.0.0 (/16) to allow direct bidirectional communication with Windows Hotspot / ICS clients (192.168.137.x)
+  - added configurable macros for LOCAL_IP, GATEWAY_IP, SUBNET_MASK, and TAILSCALE_ADVERTISE_ROUTE
+- restored WireGuard local interface packet delivery in wireguardif.c
+  - added netif_list lookup for decrypted IPv4 packets matching local interfaces (e.g. 192.168.1.50)
+  - routed packets through tcpip_input to deliver traffic to local HTTP server on port 80 rather than erroneously forwarding to Wi-Fi STA
+- updated TODO.md to mark local and subnet connectivity fix as resolved
+- updated calibration manual hold safety limit (MAX_HOLD_DURATION_MS) from 10s to 20s
+- fixed 74.03s boot time stall and 0ms Wi-Fi connect duration display
+  - prevented synchronous Tailscale API calls in setup() when Wi-Fi is still associating in background, eliminating ~74s lwIP DNS lookup timeouts
+  - reduced boot check retries to 2 with shorter 500ms backoff
+  - ensured clean fallback to cold Standby mode if Wi-Fi connects in background, handing off verification to ts_watchdog
+  - dynamically latched wifi_connect_ms in loop() when background association succeeds
+  - shortened initial ts_watchdog task delay from 45s to 15s to swiftly evaluate subnet router health after boot
+- updated documentation.md
+  - documented non-blocking boot standby and background association handling
+  - updated Gratuitous ARP keepalive interval to 15 seconds with startup pulse
+  - updated subnet mask specification to 255.255.0.0 (/16) and documented DHCP fallback for secondary networks
+  - documented 20-second manual calibration hold safety auto-release (MAX_HOLD_DURATION_MS)
+- added firmware version display across debug interfaces
+  - defined easily editable `FIRMWARE_VERSION` ("1.2") at the very last lines of `main/main.cpp`
+  - rendered small, cyber-themed monospace version footer (`v1.2`) at the bottom of the `/debug` web page
+  - added `Firmware Version` line to cURL debug endpoint output
+  - included `ver` property in `/api/live` telemetry JSON response
+- implemented live dynamic updates for Servo card in debug page
+  - rendered Servo telemetry card (`#servo-card`) unconditionally so controls and stats are visible before first actuation
+  - added DOM element IDs for last trigger (`#servo-ago`), trigger source (`#servo-src`), and actuation count (`#servo-count`)
+  - exposed latest actuation source `ss` ("cURL" vs "Web") in `/api/live` endpoint
+  - updated `APP_JS` polling routine to recalculate elapsed trigger duration and update source and count dynamically
+  - bumped `/app.js` asset version tag to `?v=4` for immediate client cache invalidation
+- updated TODO.md to mark debug firmware version and dynamic servo card features as completed
+- resolved format-truncation compiler error in handleDebug footer by streaming static action elements separately from version text
+- streamlined debug page version footer to stream directly via sendContent and added -Wno-error=format-truncation to root CMakeLists.txt
+- resolved 400ms servo stall and duplicate actuation under concurrent multi-device access
+  - added FreeRTOS task priority elevation (priority 5) during triggerPress to guarantee zero-jitter hardware timing over network tasks
+  - added missing Connection: close response headers to /style.css and /app.js to prevent socket lingering and HTTP Keep-Alive blockages
+  - increased PRESS_COOLDOWN_MS from 2s to 4s to absorb and reject speculative browser retries
+  - dispatched servo motion notification before committing to NVS flash in handleRoot to eliminate flash-write delays
+  - added client-side pointer-events disabling on primary action clicks to eliminate accidental multi-clicks
+  - tuned live telemetry polling interval from 3.5s to 4.5s to reduce concurrent TCP connection pressure on lwIP
+- updated Tailscale connect time formatting to hierarchical cascading units
+  - updated formatMs to format <1000ms as ms, 1000ms to 59s as seconds (e.g. 1s, 2.4s, 45s), and >=60s as minutes and seconds cascading to hours and days via formatDuration (e.g. 1m, 1m 5s, 2m, 1h 2m)
+  - reflected formatted connect duration across /debug dashboard and /api/live telemetry payload
+- resolved intermittent mobile phone local and subnet access degradation
+  - added dedicated /favicon.ico route returning 204 No Content with Connection: close and 7-day Cache-Control to prevent mobile browser 404 storms and socket pool starvation
+  - accelerated Gratuitous ARP and Gateway ARP probe keepalive interval from 15s to 10s to keep router ARP tables permanently fresh during modem sleep
+  - identified moto-g32 Android Doze mode / battery optimization as root cause of intermittent subnet routing drops when the phone is idle
+- implemented cross-platform Progressive Web App (PWA) architecture
+  - created /manifest.webmanifest route with standalone window display mode, portrait orientation, and cyber-dark theme colors
+  - implemented precaching Service Worker (/sw.js) for instant offline shell delivery while preserving network-direct API and actuator commands
+  - added native ⚡ emoji SVG icon (/icon.svg), apple-touch-icon.png, and favicon.ico with 7-day browser caching
+  - added mobile PWA meta tags (apple-mobile-web-app-capable, apple-mobile-web-app-status-bar-style, mobile-web-app-capable) to wrapPage and sendWrappedPageStream
+  - added mobile safe-area insets padding and overscroll-behavior-y: none to prevent standalone window rubber-banding
+  - registered /sw.js in client APP_JS and bumped asset versions to /style.css?v=4 and /app.js?v=5 for cache invalidation
+- synchronized root documentation.md with firmware code
+  - updated Gratuitous ARP and Gateway ARP probe interval from 15s to 10s (matching main.cpp)
+  - updated live telemetry /api/live polling interval from 3.5s to 4.5s (matching APP_JS)
+  - updated PRESS_COOLDOWN_MS default from 2s to 4s (main.cpp:210)
+  - updated Section 10 configuration table line numbers and added FIRMWARE_VERSION entry
+  - documented FreeRTOS priority 5 task elevation during triggerPress in concurrency section
+  - added Section 5.4 documenting Cross-Platform Progressive Web App (PWA) Engine
+- improved SEO and discoverability for README.md and documentation website
+  - added comprehensive comparison guide explaining how ESP32-SwitchBot solves remote PC boot challenges over Wake-on-LAN (WoL)
+  - contrasted non-invasive 3D-printed servo button pusher with risky motherboard front panel header relays and optocouplers
+  - explained how physical actuation overcomes BIOS AC power loss and smart plug limitations
+  - detailed advantages over ESPHome, Tasmota, Home Assistant Zigbee, Blynk, Sinric Pro, and cloud tunnels
+  - created structured Search & Discovery Index covering all primary search query keywords
+  - added SEO meta keywords and updated hero tagline in VitePress config.mts and docs/index.md
+- synchronized and optimized documentation website on website branch
+  - updated calibration manual hold safety watchdog from 10s to 20s (MAX_HOLD_DURATION_MS = 20000) across docs/about.md, docs/index.md, and guides
+  - corrected NVS namespace documentation in docs/architecture/nvs-wear-leveling.md to reflect actual firmware namespaces (esp_log, servo_log, ts_log, servo_cal)
+  - updated docs/architecture/concurrency-power.md with FreeRTOS task priority 5 elevation during actuation
+  - updated docs/interfaces/rest-api.md with complete /api/live JSON schema, 20s hold watchdog, and PWA routes
+  - updated docs/interfaces/web-dashboard.md with 20s watchdog, v1.2 debug preview footer, and PWA Add to Home Screen guide
+  - updated docs/guide/configuration.md with exact main.cpp line numbers, 255.255.0.0 (/16) subnet mask, and 4s cooldown
+  - updated VitePress favicon to ⚡ SVG emoji in docs/.vitepress/config.mts
+- optimized Android and iOS PWA installation compatibility
+  - added embedded 192x192 PNG icon array (ICON_192_PNG, 400 bytes) with ⚡ symbol for Android WebAPK minting requirements
+  - registered /icon-192.png and /icon-512.png HTTP routes with 7-day browser caching
+  - updated /apple-touch-icon.png to serve real PNG icon for iOS Safari home screen bookmarking
+  - declared separate 'any' and 'maskable' purpose PNG icon definitions and explicit id in Web App Manifest (/manifest.webmanifest)
+  - added PNG icons to Service Worker precache list (/sw.js) with cache version bump to sb-v3
+- fixed PWA offline caching bug and enforced strict live network actuation
+  - corrected Web App Manifest start_url and id from '/' to '/main' to prevent accidental servo triggering or landing on success page on app launch
+  - replaced precaching Service Worker with self-destructing cleanup worker that purges all legacy CacheStorage caches and unregisters itself
+  - updated APP_JS to unregister any active service workers and clear CacheStorage on load
+  - added Cache-Control: no-cache, no-store, must-revalidate headers across sendWrappedPageStream, handleRoot, handleMain, handleApiLive, handleClearLogs, and handleReboot
+  - bumped client asset versions to style.css?v=5 and app.js?v=6 to ensure immediate browser invalidation
+- added documentation website PNG button to README.md
+  - added high-visibility Shields.io PNG badge button at the top of README.md linking to https://psychostark.github.io/ESP32-SwitchBot/
+  - updated Detailed Documentation section to link directly to the official documentation website and firmware architecture deep-dive
+- removed artificial Search & Discovery Index keyword block from README.md
+  - eliminated raw comma-separated keyword stuffing to keep README clean and avoid modern search engine de-ranking
+  - retained natural semantic keyword density through the problem-solving and comparison guide
+- added `*.code-workspace` to `.gitignore`
+  - prevented local IDE workspace files from polluting git status
+- synchronized simplified v1.2 release notes on documentation website
+  - structured docs/about.md into clean categories (Actuation & Reliability, Networking & WireGuard, Web Dashboard & PWA)
+  - condensed low-level changelog points into user-facing release notes

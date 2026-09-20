@@ -40,6 +40,9 @@ extern "C" {
 // User-Configurable Network & System Settings
 // ==============================================================================
 
+// Firmware version is defined at the very end/bottom of this file for easy editing
+extern const char* FIRMWARE_VERSION;
+
 // Operation Mode: Set to true if running strictly on local LAN / subnet router (skips Tailscale & Microlink completely)
 #if defined(FULLY_LOCAL_MODE)
 const bool isLocalOnly = (FULLY_LOCAL_MODE != 0);
@@ -111,15 +114,30 @@ const char* ssid     = _CFG_SSID_1;
 const char* password = _CFG_PASS_1;
 
 // Wi-Fi Static IP & Subnet Settings (defaults for standard 192.168.1.x home networks)
-IPAddress local_IP(192, 168, 1, 50);
-IPAddress gateway(192, 168, 1, 1);
-IPAddress subnet(255, 255, 255, 0);
+#ifndef LOCAL_IP
+  #define LOCAL_IP 192, 168, 1, 50
+#endif
+#ifndef GATEWAY_IP
+  #define GATEWAY_IP 192, 168, 1, 1
+#endif
+#ifndef SUBNET_MASK
+  // Netmask 255.255.0.0 (/16) allows seamless bidirectional LAN communication
+  // with both standard home network devices (192.168.1.x) and Windows Hotspot/ICS devices (192.168.137.x)
+  #define SUBNET_MASK 255, 255, 0, 0
+#endif
+
+IPAddress local_IP(LOCAL_IP);
+IPAddress gateway(GATEWAY_IP);
+IPAddress subnet(SUBNET_MASK);
 IPAddress primaryDNS(1, 1, 1, 1);
 IPAddress secondaryDNS(8, 8, 8, 8);
-IPAddress routerDNS(192, 168, 1, 1);
+IPAddress routerDNS(GATEWAY_IP);
 
 // Tailscale subnet route advertised by this device
-const char* tailscaleAdvertiseRoute = "192.168.1.0/24";
+#ifndef TAILSCALE_ADVERTISE_ROUTE
+  #define TAILSCALE_ADVERTISE_ROUTE "192.168.1.0/24"
+#endif
+const char* tailscaleAdvertiseRoute = TAILSCALE_ADVERTISE_ROUTE;
 
 // Controls whether web dashboards use Google Fonts (Inter) or local system fonts.
 // Automatically disabled if running in fully local mode.
@@ -141,7 +159,7 @@ int testDurationMs = DEFAULT_PRESS_DURATION_MS;
 // Hold safety watchdog state
 volatile bool isHoldActive = false;
 unsigned long holdStartTimeMs = 0;
-const unsigned long MAX_HOLD_DURATION_MS = 10000; // 10 seconds safety limit
+const unsigned long MAX_HOLD_DURATION_MS = 20000; // 20 seconds safety limit
 
 // Parse timezone offset string like "0530", "+05:30", "+0630", "-05:00", "-0500", "+5.5", "+5", "-5", "0" into seconds
 inline long parseTimezoneOffsetSec(const char* tzStr) {
@@ -188,8 +206,8 @@ Servo myservo;
 WebServer server(80);
 
 uint32_t last_press_time = 0;
-// Minimum time to wait between button presses to protect the motor
-const uint32_t PRESS_COOLDOWN_MS = 2000;
+// Minimum time to wait between button presses to protect the motor and debounce retries
+const uint32_t PRESS_COOLDOWN_MS = 4000;
 
 // Signals the background worker to move the servo without freezing web requests
 static volatile bool pendingPress = false;
@@ -199,6 +217,7 @@ static String s_cachedSubnetDeviceId = "";
 uint32_t first_boot_epoch = 0;
 uint32_t boot_time_ms = 0;
 uint32_t wifi_connect_ms = 0;
+uint32_t wifi_start_ms = 0;
 bool time_synced = false;
 bool log_time_fixed = false;
 
@@ -281,13 +300,21 @@ void initServo() {
 }
 
 void triggerPress() {
+  TaskHandle_t curTask = xTaskGetCurrentTaskHandle();
+  UBaseType_t origPriority = uxTaskPriorityGet(curTask);
+  // Elevate priority above http_srv (4) to guarantee zero-jitter mechanical timing
+  vTaskPrioritySet(curTask, 5);
+
+  initServo();
   myservo.attach(servoPin, 500, 2400);
   myservo.write(pressAngle);
-  delay(pressDurationMs);
+  vTaskDelay(pdMS_TO_TICKS(pressDurationMs));
   myservo.write(restAngle);
   int travelDelay = max(60, abs(pressAngle - restAngle) * 3);
-  delay(travelDelay);
+  vTaskDelay(pdMS_TO_TICKS(travelDelay));
   myservo.detach();
+
+  vTaskPrioritySet(curTask, origPriority);
 }
 
 float getEstimatedPowerW() {
@@ -750,10 +777,18 @@ void formatDuration(uint64_t totalSec, char* buffer, size_t maxLen) {
 }
 
 void formatMs(uint32_t ms, char* buffer, size_t maxLen) {
-  if (ms >= 1000) {
-    snprintf(buffer, maxLen, "%.2fs", (float)ms / 1000.0f);
-  } else {
+  if (ms < 1000) {
     snprintf(buffer, maxLen, "%lums", (unsigned long)ms);
+  } else if (ms < 60000) {
+    if (ms % 1000 == 0) {
+      snprintf(buffer, maxLen, "%lus", (unsigned long)(ms / 1000));
+    } else if (ms < 10000) {
+      snprintf(buffer, maxLen, "%.1fs", (float)ms / 1000.0f);
+    } else {
+      snprintf(buffer, maxLen, "%lus", (unsigned long)((ms + 500) / 1000));
+    }
+  } else {
+    formatDuration((uint64_t)((ms + 500) / 1000), buffer, maxLen);
   }
 }
 
@@ -977,6 +1012,7 @@ static esp_err_t ts_http_event_handler(esp_http_client_event_t *evt) {
  * Supports numeric device ID or machine hostname.
  */
 bool checkTailscaleSubnetRouterOnline(const char* apiKey, const char* deviceIdent) {
+  if (WiFi.status() != WL_CONNECTED) return false;
   if (!apiKey || strlen(apiKey) == 0) return false;
   if (!deviceIdent || strlen(deviceIdent) == 0) return false;
 
@@ -1105,13 +1141,13 @@ void handleRoot() {
   }
   last_press_time = now;
   bool curlReq = isCurl();
-  // Save this button press to the history log in flash memory
-  recordServoTrigger(curlReq);
-  // Tell the background worker to move the motor and wake it up immediately
+  // Tell the background worker to move the motor immediately
   pendingPress = true;
   if (loopTaskHandle != nullptr) {
     xTaskNotifyGive(loopTaskHandle);
   }
+  // Save this button press to the history log in flash memory
+  recordServoTrigger(curlReq);
 
   char upBuf[32]; formatDuration(esp_timer_get_time() / 1000000ULL, upBuf, sizeof(upBuf));
 
@@ -1119,6 +1155,7 @@ void handleRoot() {
     char out[192];
     snprintf(out, sizeof(out), "\n[+] SUCCESS: Servo tap queued.\n[i] ESP Uptime: %s\n\n", upBuf);
     server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server.send(200, "text/plain; charset=utf-8", out);
   } else {
     char body[320];
@@ -1140,6 +1177,7 @@ void handleMain() {
     if (host.length() == 0) host = "esp32.local";
     String script = generateCurlDashboardScript(host, OTA_KEY);
     server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server.send(200, "text/plain; charset=utf-8", script);
   } else {
     String primaryAction = isCalibrated
@@ -1372,8 +1410,10 @@ void handleApiLive() {
 
   ServoLog latestServo;
   uint32_t servoTimestamp = 0;
+  const char* servoSource = "-";
   if (getServoLogAt(0, latestServo) && servoLogCount > 0) {
     servoTimestamp = latestServo.timestamp;
+    servoSource = latestServo.fromCurl ? "cURL" : "Web";
   }
 
   time_t nowSec = 0;
@@ -1438,22 +1478,29 @@ void handleApiLive() {
     }
   }
 
-  char json[896];
+  char json[1024];
   snprintf(json, sizeof(json),
-    "{\"u\":\"%s\",\"uf\":\"%s\",\"t\":%.0f,\"ru\":%lu,\"rt\":%lu,\"c\":%lu,\"p\":%.2f,\"ota\":%d,\"sl\":%lu,\"st\":%lu,\"sc\":%lu,\"ts\":%lu,\"ts_st\":\"%s\",\"ts_cls\":\"%s\",\"ts_ip\":\"%s\",\"ts_conn\":\"%s\",\"ts_cm\":%lu,\"ts_cs\":\"%s\",\"ts0_act\":%lu,\"ts0_end\":\"%s\",\"ts0_dur\":\"%s\",\"ts0_dt\":\"%s\",\"cal\":%d,\"s_rest\":%d,\"s_press\":%d,\"s_dur\":%d,\"local\":%d,\"w_idx\":%d,\"w_tot\":%d}",
+    "{\"u\":\"%s\",\"uf\":\"%s\",\"t\":%.0f,\"ru\":%lu,\"rt\":%lu,\"c\":%lu,\"p\":%.2f,\"ota\":%d,\"sl\":%lu,\"st\":%lu,\"sc\":%lu,\"ss\":\"%s\",\"ts\":%lu,\"ts_st\":\"%s\",\"ts_cls\":\"%s\",\"ts_ip\":\"%s\",\"ts_conn\":\"%s\",\"ts_cm\":%lu,\"ts_cs\":\"%s\",\"ts0_act\":%lu,\"ts0_end\":\"%s\",\"ts0_dur\":\"%s\",\"ts0_dt\":\"%s\",\"cal\":%d,\"s_rest\":%d,\"s_press\":%d,\"s_dur\":%d,\"local\":%d,\"w_idx\":%d,\"w_tot\":%d,\"ver\":\"%s\"}",
     upBuf, flashBuf, cachedTemp, (ramTotal - ramFree), ramTotal, ESP.getCpuFreqMHz(), cachedPower,
-    otaEnabled ? 1 : 0, (unsigned long)servoTimestamp, (unsigned long)nowSec, (unsigned long)servoLogCount,
+    otaEnabled ? 1 : 0, (unsigned long)servoTimestamp, (unsigned long)nowSec, (unsigned long)servoLogCount, servoSource,
     (unsigned long)tsStart, tsSt, tsCls, vpnIpBuf, connTypeBuf,
     (unsigned long)ts_connect_ms, tsConnectBuf,
     (unsigned long)ts0_act, ts0_end_buf, ts0_dur_buf, ts0_dt_buf,
     isCalibrated ? 1 : 0, restAngle, pressAngle, pressDurationMs,
-    isLocalOnly ? 1 : 0, currentWifiIndex + 1, activeWifiCount);
+    isLocalOnly ? 1 : 0, currentWifiIndex + 1, activeWifiCount,
+    FIRMWARE_VERSION);
   
   server.sendHeader("Connection", "close");
+  server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  server.sendHeader("Pragma", "no-cache");
+  server.sendHeader("Expires", "0");
   server.send(200, "application/json", json);
 }
 
 void handleDebug() {
+  char verStr[32];
+  snprintf(verStr, sizeof(verStr), "%s%s", (FIRMWARE_VERSION[0] == 'v' || FIRMWARE_VERSION[0] == 'V') ? "" : "v", FIRMWARE_VERSION);
+
   char flashDuration[32] = "Awaiting NTP Sync...";
   if (time_synced && first_boot_epoch > 0) {
     time_t now; time(&now);
@@ -1536,9 +1583,11 @@ void handleDebug() {
 
     off += snprintf(b + off, sizeof(b) - off,
       " Total Boot Count     : %lu\n"
-      " OTA Status           : %s\n",
+      " OTA Status           : %s\n"
+      " Firmware Version     : %s\n",
       totalBootCount,
-      otaEnabled ? "Enabled" : "Disabled"
+      otaEnabled ? "Enabled" : "Disabled",
+      verStr
     );
     server.sendContent(b);
 
@@ -1763,17 +1812,19 @@ void handleDebug() {
       snprintf(b + offBoot, sizeof(b) - offBoot, "</div>");
       server.sendContent(b);
 
-      if (hasServoLatest) {
-        snprintf(b, sizeof(b),
-          "<h3>Servo</h3>"
-          "<div class='card'>"
-          "<div class='row'><span class='k'>Last Trigger</span><span class='v mono' id='servo-ago'>%s</span></div>"
-          "<div class='row'><span class='k'>Trigger Source</span><span class='v mono'>%s</span></div>"
-          "<div class='row'><span class='k'>Total Triggers</span><span class='v mono'>%lu</span></div>"
-          "</div>",
-          lastServoAgo, latestServo.fromCurl ? "cURL" : "Web", servoLogCount);
-        server.sendContent(b);
-      }
+      char servoAgoBuf[48];
+      snprintf(servoAgoBuf, sizeof(servoAgoBuf), "%s", hasServoLatest ? lastServoAgo : "Never");
+      const char* servoSrcStr = hasServoLatest ? (latestServo.fromCurl ? "cURL" : "Web") : "-";
+
+      snprintf(b, sizeof(b),
+        "<h3>Servo</h3>"
+        "<div class='card' id='servo-card'>"
+        "<div class='row'><span class='k'>Last Trigger</span><span class='v mono' id='servo-ago'>%s</span></div>"
+        "<div class='row'><span class='k'>Trigger Source</span><span class='v mono' id='servo-src'>%s</span></div>"
+        "<div class='row'><span class='k'>Total Triggers</span><span class='v mono' id='servo-count'>%lu</span></div>"
+        "</div>",
+        servoAgoBuf, servoSrcStr, (unsigned long)servoLogCount);
+      server.sendContent(b);
 
       if (servoLogCount > 1) {
         server.sendContent("<h3>Servo Trigger History</h3><div class='card'>");
@@ -1986,6 +2037,10 @@ void handleDebug() {
         "</div>"
         "<a class='back' href='/main'>&larr; Back to Dashboard</a>"
       );
+
+      server.sendContent("<div class='mono' style='text-align:center;margin-top:20px;font-size:11px;color:var(--on-surface-v);letter-spacing:0.5px;'>");
+      server.sendContent(verStr);
+      server.sendContent("</div>");
     }, "");
   }
 }
@@ -2079,6 +2134,7 @@ void handleClearLogs() {
     String page = wrapPage("Logs Cleared", "&#128465;", body,
       "<script>setTimeout(function(){window.location.href='/debug';},2000);</script>", true);
     server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server.send(200, "text/html; charset=utf-8", page);
   }
 }
@@ -2086,6 +2142,7 @@ void handleClearLogs() {
 void handleReboot() {
   if (isCurl()) {
     server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server.send(200, "text/plain; charset=utf-8", "\n[ SYSTEM ] Rebooting ESP32 now...\n\n");
   } else {
     const char* body =
@@ -2097,6 +2154,7 @@ void handleReboot() {
     String page = wrapPage("Rebooting...", "&#128260;", body,
       "<script>setTimeout(function(){window.location.href='/main';},5000);</script>", true);
     server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server.send(200, "text/html; charset=utf-8", page);
   }
   delay(500);
@@ -2153,13 +2211,13 @@ void checkSubnetAndFailoverIfNeeded() {
 }
 
 // Periodic ARP / Gateway keepalive: sends a Gratuitous ARP and a Gateway ARP probe
-// every 45 seconds so consumer Wi-Fi routers (and local devices) never drop 192.168.1.50
-// from their ARP routing table while the ESP32 is in Wi-Fi modem sleep.
-void sendLanArpKeepaliveIfNeeded() {
+// every 10 seconds (or immediately on demand) so consumer Wi-Fi routers (and local devices)
+// never drop 192.168.1.50 from their ARP routing table while the ESP32 is in Wi-Fi modem sleep.
+void sendLanArpKeepaliveIfNeeded(bool force = false) {
   if (WiFi.status() != WL_CONNECTED) return;
   static unsigned long lastArpKeepaliveMs = 0;
   unsigned long now = millis();
-  if (now - lastArpKeepaliveMs < 45000) return;
+  if (!force && (now - lastArpKeepaliveMs < 10000)) return;
   lastArpKeepaliveMs = now;
 
   esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
@@ -2175,7 +2233,7 @@ void sendLanArpKeepaliveIfNeeded() {
 }
 
 void checkWifiReconnectIfNeeded() {
-  if (activeWifiCount <= 1) return;
+  if (activeWifiCount == 0) return;
 
   static unsigned long lastWifiCheckMs = 0;
   static unsigned long disconnectStartMs = 0;
@@ -2187,19 +2245,39 @@ void checkWifiReconnectIfNeeded() {
   if (WiFi.status() != WL_CONNECTED) {
     if (disconnectStartMs == 0) {
       disconnectStartMs = now;
-    } else if (now - disconnectStartMs > 15000) {
-      currentWifiIndex = (currentWifiIndex + 1) % activeWifiCount;
-      ESP_LOGW("wifi", "Connection lost for >15s. Switching to fallback Wi-Fi [%d/%d]: '%s'",
-               currentWifiIndex + 1, activeWifiCount, configuredWifiNetworks[currentWifiIndex].ssid);
+      ESP_LOGW("wifi", "Wi-Fi connection lost. Waiting to reconnect...");
+    } else if (now - disconnectStartMs > 8000) {
+      if (activeWifiCount > 1) {
+        currentWifiIndex = (currentWifiIndex + 1) % activeWifiCount;
+        ESP_LOGW("wifi", "Connection lost for >8s. Switching to Wi-Fi [%d/%d]: '%s'",
+                 currentWifiIndex + 1, activeWifiCount, configuredWifiNetworks[currentWifiIndex].ssid);
+      } else {
+        ESP_LOGW("wifi", "Connection lost for >8s. Reconnecting to Wi-Fi '%s'...",
+                 configuredWifiNetworks[0].ssid);
+      }
       WiFi.disconnect(false);
       delay(100);
+
+      // On primary network, re-apply static IP. On fallback networks, use DHCP for hotspot compatibility.
+      if (currentWifiIndex == 0) {
+        WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS);
+      } else {
+        WiFi.config(IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0));
+      }
+
       WiFi.begin(configuredWifiNetworks[currentWifiIndex].ssid, configuredWifiNetworks[currentWifiIndex].password);
       disconnectStartMs = now;
     }
   } else {
     if (disconnectStartMs != 0) {
+      ESP_LOGI("wifi", "Wi-Fi reconnected successfully to '%s' (IP: %s)",
+               configuredWifiNetworks[currentWifiIndex].ssid, WiFi.localIP().toString().c_str());
+      if (wifi_connect_ms == 0 && wifi_start_ms > 0) {
+        wifi_connect_ms = millis() - wifi_start_ms;
+      }
       updateBootWifiIndex((uint8_t)currentWifiIndex);
       disconnectStartMs = 0;
+      sendLanArpKeepaliveIfNeeded(true);
     }
   }
 }
@@ -2237,7 +2315,8 @@ void setup() {
     }
   }
 
-  uint32_t wifi_start = millis();
+  wifi_start_ms = millis();
+  uint32_t wifi_start = wifi_start_ms;
   WiFi.mode(WIFI_STA);
   wifi_config_t sta_conf;
   if (esp_wifi_get_config(WIFI_IF_STA, &sta_conf) == ESP_OK) {
@@ -2280,8 +2359,7 @@ void setup() {
   }
 
   if (!connected) {
-    wifi_connect_ms = 0;
-    ESP_LOGE("wifi", "Failed to connect to any configured Wi-Fi network!");
+    ESP_LOGW("wifi", "Wi-Fi connecting in background to '%s'...", configuredWifiNetworks[0].ssid);
     if (activeWifiCount > 0) {
       WiFi.begin(configuredWifiNetworks[0].ssid, configuredWifiNetworks[0].password);
       currentWifiIndex = 0;
@@ -2297,6 +2375,7 @@ void setup() {
 
   // Give 802.11 association, block ack, and router forwarding time to settle
   delay(1500);
+  sendLanArpKeepaliveIfNeeded(true);
 
   // Tailscale / Microlink initialization (completely bypassed if in fully local mode)
   if (!isLocalOnly && strlen(TAILSCALE_KEY) > 0) {
@@ -2318,14 +2397,18 @@ void setup() {
     if (strlen(TAILSCALE_API_KEY) > 0 && strlen(TAILSCALE_SUBNET_DEVICE_ID) > 0) {
       ESP_LOGI("watchdog", "Tailscale API watchdog active. Target subnet router: %s", TAILSCALE_SUBNET_DEVICE_ID);
       bool motoOnline = false;
-      for (int attempt = 1; attempt <= 3; attempt++) {
-        if (checkTailscaleSubnetRouterOnline(TAILSCALE_API_KEY, TAILSCALE_SUBNET_DEVICE_ID)) {
-          motoOnline = true;
-          break;
-        }
-        if (attempt < 3) {
-          ESP_LOGW("watchdog", "Boot check attempt %d/3 failed, retrying in 1s...", attempt);
-          delay(1000);
+
+      // Only perform synchronous HTTPS check if Wi-Fi has already connected.
+      // If Wi-Fi is still associating in the background, do NOT block setup() with DNS timeouts.
+      if (WiFi.status() == WL_CONNECTED) {
+        for (int attempt = 1; attempt <= 2; attempt++) {
+          if (checkTailscaleSubnetRouterOnline(TAILSCALE_API_KEY, TAILSCALE_SUBNET_DEVICE_ID)) {
+            motoOnline = true;
+            break;
+          }
+          if (attempt < 2) {
+            delay(500);
+          }
         }
       }
 
@@ -2334,16 +2417,27 @@ void setup() {
         mlRunning = false;
         mlStandbyMode = true;
         subnetFailCount = 0;
-      } else {
+      } else if (WiFi.status() == WL_CONNECTED) {
         ESP_LOGW("watchdog", "Subnet router '%s' is NOT connected to Tailscale. Starting Tailscale failover immediately.", TAILSCALE_SUBNET_DEVICE_ID);
         startTailscale("boot - subnet router disconnected from Tailscale");
+      } else {
+        // Wi-Fi connecting in background: enter standby mode cleanly.
+        // The background ts_watchdog task will check subnet status once Wi-Fi is up.
+        ESP_LOGI("watchdog", "Wi-Fi connecting in background. ESP32 initialized in STANDBY; ts_watchdog will verify router status.");
+        mlRunning = false;
+        mlStandbyMode = true;
+        subnetFailCount = 0;
       }
     } else {
       ESP_LOGI("watchdog", "No TAILSCALE_API_KEY configured. Connecting directly to Tailscale at boot.");
-      startTailscale("direct startup");
+      if (WiFi.status() == WL_CONNECTED) {
+        startTailscale("direct startup");
+      }
     }
 #else
-    startTailscale("direct startup");
+    if (WiFi.status() == WL_CONNECTED) {
+      startTailscale("direct startup");
+    }
 #endif
   } else {
     ESP_LOGI("system", "Running in FULLY LOCAL MODE (Tailscale & Microlink bypassed).");
@@ -2377,12 +2471,51 @@ void setup() {
   server.on("/clear-logs", HTTP_ANY, handleClearLogs);
   server.on("/api/live", HTTP_GET, handleApiLive);
   server.on("/style.css", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
     server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
     server.send_P(200, "text/css; charset=utf-8", COMMON_CSS);
   });
   server.on("/app.js", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
     server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
     server.send_P(200, "application/javascript; charset=utf-8", APP_JS);
+  });
+  server.on("/manifest.webmanifest", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
+    server.send_P(200, "application/manifest+json; charset=utf-8", MANIFEST_WEBMANIFEST);
+  });
+  server.on("/sw.js", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server.sendHeader("Pragma", "no-cache");
+    server.sendHeader("Expires", "0");
+    server.send_P(200, "application/javascript; charset=utf-8", SW_JS);
+  });
+  server.on("/icon.svg", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
+    server.send_P(200, "image/svg+xml", ICON_SVG);
+  });
+  server.on("/icon-192.png", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
+    server.send_P(200, "image/png", (const char*)ICON_192_PNG, ICON_192_PNG_LEN);
+  });
+  server.on("/icon-512.png", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
+    server.send_P(200, "image/png", (const char*)ICON_192_PNG, ICON_192_PNG_LEN);
+  });
+  server.on("/apple-touch-icon.png", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
+    server.send_P(200, "image/png", (const char*)ICON_192_PNG, ICON_192_PNG_LEN);
+  });
+  server.on("/favicon.ico", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
+    server.send_P(200, "image/svg+xml", ICON_SVG);
   });
   server.on("/ota/enable", HTTP_POST, handleOtaEnable);
   server.on("/ota/disable", HTTP_POST, handleOtaDisable);
@@ -2414,7 +2547,7 @@ void setup() {
     // to api.tailscale.com NEVER stall Core 1, loop(), or instantaneous servo actuation.
     xTaskCreatePinnedToCore(
       [](void*) {
-        vTaskDelay(pdMS_TO_TICKS(45000));
+        vTaskDelay(pdMS_TO_TICKS(15000));
         for (;;) {
           checkSubnetAndFailoverIfNeeded();
           vTaskDelay(pdMS_TO_TICKS(45000));
@@ -2460,7 +2593,7 @@ void loop() {
     myservo.detach();
   }
 
-  // Safety watchdog for calibration manual hold: auto-release if held > MAX_HOLD_DURATION_MS (10000ms)
+  // Safety watchdog for calibration manual hold: auto-release if held > MAX_HOLD_DURATION_MS (20000ms)
   if (isHoldActive && (millis() - holdStartTimeMs > MAX_HOLD_DURATION_MS)) {
     isHoldActive = false;
     initServo();
@@ -2479,6 +2612,11 @@ void loop() {
   // Check if primary Wi-Fi is alive, or failover to backup network
   checkWifiReconnectIfNeeded();
 
+  // If Wi-Fi connected in the background after boot, latch the initial connection time
+  if (wifi_connect_ms == 0 && wifi_start_ms > 0 && WiFi.status() == WL_CONNECTED) {
+    wifi_connect_ms = millis() - wifi_start_ms;
+  }
+
   if (mlRunning && mlStartedAtMs > 0) {
     rtc_ts_duration_s = (millis() - mlStartedAtMs) / 1000;
     if (!ts_connected_latched && (ml != nullptr) && microlink_is_connected(ml)) {
@@ -2491,3 +2629,8 @@ void loop() {
   // FreeRTOS tickless idle (waiti 0) halts the CPU during this interval to preserve low temperature.
   ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
 }
+
+// ===============================
+// Firmware Version Configuration
+// ================================
+const char* FIRMWARE_VERSION = "1.2";

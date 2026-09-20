@@ -8,7 +8,71 @@ extern bool enableOnlineFonts;
 static const char GOOGLE_FONT_IMPORT[] =
 "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');";
 
-// Shared CSS styling for all web pages (cyber-dark theme and responsive cards)
+// Scalable SVG icon using ⚡ emoji for home screen, browser tabs, and bookmarking
+static const char ICON_SVG[] =
+"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
+"<style>text{font-family:system-ui,-apple-system,sans-serif;}</style>"
+"<text y='.9em' font-size='90'>⚡</text>"
+"</svg>";
+
+// Embedded 192x192 PNG icon with ⚡ symbol for Android WebAPK minting (400 bytes)
+static const unsigned char ICON_192_PNG[] PROGMEM = {
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0xc0, 0x08, 0x03, 0x00, 0x00, 0x00, 0x65, 0x02, 0x9c,
+  0x35, 0x00, 0x00, 0x00, 0x06, 0x50, 0x4c, 0x54, 0x45, 0x00, 0x00, 0x00, 0xff, 0xcc, 0x00, 0x7c,
+  0xb0, 0x15, 0x60, 0x00, 0x00, 0x01, 0x45, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0xed, 0xd8, 0xc1,
+  0x0d, 0xc4, 0x40, 0x0c, 0xc3, 0x40, 0xb9, 0xff, 0xa6, 0x53, 0x42, 0x10, 0xf8, 0x61, 0xe8, 0x6e,
+  0x54, 0x01, 0x09, 0xee, 0x23, 0x71, 0x62, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x6f, 0x9b, 0x76,
+  0x7e, 0x02, 0xd7, 0xfc, 0xd3, 0xce, 0x3f, 0x02, 0x08, 0xb0, 0xe2, 0x27, 0x70, 0xcd, 0x3f, 0xed,
+  0xfc, 0x83, 0x9f, 0xc0, 0x8a, 0x7f, 0xda, 0xf9, 0x09, 0x5c, 0xf3, 0x4f, 0x3b, 0xff, 0x08, 0x20,
+  0xc0, 0x8a, 0x9f, 0xc0, 0x35, 0xff, 0xb4, 0xf3, 0x8f, 0x00, 0x02, 0xac, 0xf8, 0xa7, 0x9d, 0x9f,
+  0xc0, 0x35, 0xff, 0xb4, 0xf3, 0x8f, 0x00, 0x02, 0xac, 0xf8, 0x09, 0x5c, 0xf3, 0x4f, 0x3b, 0xff,
+  0x08, 0x20, 0xc0, 0x8a, 0x7f, 0xda, 0xf9, 0x09, 0x5c, 0xf3, 0x4f, 0x3b, 0xff, 0x08, 0x20, 0xc0,
+  0x8a, 0x9f, 0xc0, 0x35, 0xff, 0xb4, 0xf3, 0x8f, 0x00, 0x02, 0xac, 0xf8, 0x09, 0x5c, 0xf3, 0x4f,
+  0x3b, 0xff, 0xb4, 0xf3, 0x8f, 0x00, 0x02, 0xac, 0xf8, 0x09, 0x5c, 0xf3, 0x4f, 0x3b, 0xff, 0x08,
+  0x20, 0xc0, 0x8a, 0x9f, 0xc0, 0x35, 0xff, 0xb4, 0xf3, 0x13, 0xc0, 0xbf, 0xe3, 0x9f, 0x76, 0xfe,
+  0x7e, 0x81, 0xaf, 0xc3, 0xff, 0x1f, 0xfc, 0x02, 0xe0, 0x17, 0x00, 0xbf, 0x07, 0x84, 0xbf, 0xf5,
+  0x01, 0xf9, 0xe8, 0xf3, 0xdb, 0x83, 0x9f, 0xc0, 0xcf, 0x9d, 0x8e, 0xdc, 0xee, 0x5c, 0x7f, 0x57,
+  0x02, 0x11, 0x40, 0x80, 0x8d, 0x40, 0x08, 0xdc, 0x0a, 0xa4, 0x5c, 0x20, 0x02, 0x08, 0xb0, 0x11,
+  0x48, 0xb9, 0x40, 0x08, 0xdc, 0x0a, 0xa4, 0x5c, 0x20, 0x02, 0x08, 0xb0, 0x11, 0x08, 0x81, 0x5b,
+  0x81, 0x94, 0x0b, 0x44, 0x00, 0x01, 0x36, 0x02, 0x21, 0x70, 0x2b, 0x90, 0x72, 0x81, 0x94, 0x0b,
+  0x44, 0x00, 0x01, 0x36, 0x02, 0x21, 0x70, 0x2b, 0x90, 0x72, 0x81, 0x08, 0x20, 0xc0, 0x46, 0x20,
+  0x04, 0x6e, 0x05, 0x52, 0x2e, 0x90, 0x72, 0x81, 0x08, 0x20, 0xc0, 0x46, 0x20, 0x04, 0x6e, 0x05,
+  0x52, 0x2e, 0x10, 0x01, 0x04, 0xd8, 0x08, 0x84, 0xc0, 0xad, 0x40, 0xca, 0x05, 0x42, 0x00, 0xff,
+  0x46, 0x20, 0xe5, 0x02, 0x21, 0x70, 0x2b, 0x90, 0x72, 0x81, 0x08, 0x20, 0xc0, 0x46, 0x20, 0x04,
+  0x6e, 0x05, 0x62, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x6f, 0x7b, 0x00, 0x2a, 0xcc, 0x0f, 0xbf,
+  0xe4, 0x2f, 0x66, 0x30, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+};
+static const size_t ICON_192_PNG_LEN = 400;
+
+// Web App Manifest for cross-platform PWA installation (Desktop, Android, iOS)
+static const char MANIFEST_WEBMANIFEST[] =
+"{\"name\":\"ESP32-SwitchBot\","
+"\"short_name\":\"SwitchBot\","
+"\"description\":\"Encrypted Physical Switch Actuator Dashboard\","
+"\"id\":\"/main\","
+"\"start_url\":\"/main\","
+"\"scope\":\"/\","
+"\"display\":\"standalone\","
+"\"orientation\":\"portrait\","
+"\"background_color\":\"#000000\","
+"\"theme_color\":\"#000000\","
+"\"icons\":["
+"{\"src\":\"/icon-192.png\",\"sizes\":\"192x192\",\"type\":\"image/png\",\"purpose\":\"any\"},"
+"{\"src\":\"/icon-192.png\",\"sizes\":\"192x192\",\"type\":\"image/png\",\"purpose\":\"maskable\"},"
+"{\"src\":\"/icon-512.png\",\"sizes\":\"512x512\",\"type\":\"image/png\",\"purpose\":\"any\"},"
+"{\"src\":\"/icon-512.png\",\"sizes\":\"512x512\",\"type\":\"image/png\",\"purpose\":\"maskable\"},"
+"{\"src\":\"/icon.svg\",\"sizes\":\"any\",\"type\":\"image/svg+xml\",\"purpose\":\"any\"}"
+"]}";
+
+// Self-destructing cleanup worker: purges any legacy offline caches and unregisters itself to enforce live network actuation
+static const char SW_JS[] =
+"self.addEventListener('install',function(){self.skipWaiting();});"
+"self.addEventListener('activate',function(e){"
+"e.waitUntil(caches.keys().then(function(k){return Promise.all(k.map(function(n){return caches.delete(n);}));}).then(function(){return self.clients.claim();}).then(function(){return self.registration.unregister();}));"
+"});";
+
+// Shared CSS styling for all web pages (cyber-dark theme, responsive cards, and PWA mobile safe-areas)
 static const char COMMON_CSS[] =
 ":root{--bg:#000000;--surface:rgba(15,23,36,0.72);--surface-c:rgba(26,38,56,0.65);"
 "--surface-border:rgba(255,255,255,0.08);--primary:#8ab4f8;--primary-glow:rgba(138,180,248,0.25);"
@@ -19,10 +83,11 @@ static const char COMMON_CSS[] =
 "body{background-color:#000;background-image:radial-gradient(circle at 50% 0%,rgba(24,38,64,0.45) 0%,rgba(8,13,22,0.85) 65%,#000 100%);"
 "background-attachment:fixed;color:var(--on-surface);min-height:100%;min-height:100dvh;"
 "font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;"
-"display:flex;justify-content:center;align-items:flex-start;margin:0;padding:0;-webkit-tap-highlight-color:transparent;overflow-x:hidden;}"
-".wrap{width:100%;max-width:680px;padding:32px 20px 56px;min-height:100%;}"
-".wrap.centered{max-width:440px;width:100%;min-height:100dvh;padding:20px;"
+"display:flex;justify-content:center;align-items:flex-start;margin:0;padding:0;-webkit-tap-highlight-color:transparent;overflow-x:hidden;overscroll-behavior-y:none;}"
+".wrap{width:100%;max-width:680px;padding:max(32px,env(safe-area-inset-top,32px)) max(20px,env(safe-area-inset-right,20px)) max(56px,env(safe-area-inset-bottom,56px)) max(20px,env(safe-area-inset-left,20px));min-height:100%;}"
+".wrap.centered{max-width:440px;width:100%;min-height:100dvh;padding:max(20px,env(safe-area-inset-top,20px)) max(20px,env(safe-area-inset-right,20px)) max(20px,env(safe-area-inset-bottom,20px)) max(20px,env(safe-area-inset-left,20px));"
 "display:flex;flex-direction:column;justify-content:center;align-items:stretch;align-self:center;box-sizing:border-box;}"
+"button,.nav a,.card,.row,.log-item{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;}"
 "@media (min-width:768px){.wrap{max-width:760px;padding:48px 32px 64px;}.wrap.centered{max-width:460px;padding:32px;}}"
 "h1,h2{font-family:'Inter',sans-serif;font-weight:700;color:#f1f5f9;letter-spacing:-0.3px;margin:0 0 20px;text-align:center;}"
 "h1{font-size:24px;}"
@@ -148,8 +213,14 @@ static const char APP_JS[] =
 "if(el=document.getElementById('ram'))el.textContent=d.ru+'/'+d.rt+' KB';"
 "if(el=document.getElementById('clk'))el.textContent=d.c+' MHz';"
 "if(el=document.getElementById('servo-ago')){"
+"if(d.sc>0){"
 "if(d.sl>0&&d.st>=d.sl){el.textContent=__fmtAgo(d.st-d.sl);}"
+"else if(d.sl>0){el.textContent='Awaiting NTP Sync...';}"
+"else{el.textContent='Recent (Pre-NTP)';}"
+"}else{el.textContent='Never';}"
 "}"
+"if(el=document.getElementById('servo-src')){el.textContent=d.ss||'-';}"
+"if(el=document.getElementById('servo-count')){el.textContent=d.sc;}"
 "if(el=document.getElementById('ts-dur-val')){"
 "if(d.ts>0&&d.st>=d.ts){el.textContent=__fmtDur(d.st-d.ts);}"
 "}"
@@ -183,10 +254,10 @@ static const char APP_JS[] =
 "if(d.ts_cls==='on'&&d.ts_cs){r.style.display='';if(el=document.getElementById('ts-conn-time'))el.textContent=d.ts_cs;}"
 "else{r.style.display='none';}"
 "}"
-"}).catch(function(){}).finally(function(){__scheduleNext(3500);});"
+"}).catch(function(){}).finally(function(){__scheduleNext(4500);});"
 "}"
-"function __scheduleNext(ms){if(!document.hidden){clearTimeout(__poll);__poll=setTimeout(__pollTick,ms||3500);}}"
-"function __pollStart(){if(!document.getElementById('up')&&!document.getElementById('ram'))return;if(__poll)return;__scheduleNext(3500);}"
+"function __scheduleNext(ms){if(!document.hidden){clearTimeout(__poll);__poll=setTimeout(__pollTick,ms||4500);}}"
+"function __pollStart(){if(!document.getElementById('up')&&!document.getElementById('ram'))return;if(__poll)return;__scheduleNext(4500);}"
 "function __pollStop(){if(__poll){clearTimeout(__poll);__poll=null;}}"
 "document.addEventListener('visibilitychange',function(){if(document.hidden)__pollStop();else __pollStart();});"
 "function __showToast(msg){"
@@ -215,6 +286,10 @@ static const char APP_JS[] =
 "document.addEventListener('click',function(e){"
 "var b=e.target.closest('button,.nav a,a.back');"
 "if(b){"
+"if(b.classList.contains('primary')||b.getAttribute('href')==='/'){"
+"b.style.pointerEvents='none';"
+"b.style.opacity='0.6';"
+"}"
 "if(navigator.vibrate){"
 "if(b.classList.contains('primary')||b.getAttribute('href')==='/'){"
 "navigator.vibrate([35,15,45]);"
@@ -280,24 +355,36 @@ static const char APP_JS[] =
 "}"
 "function __initApp(){"
 "__initLogToggles();"
+"if('serviceWorker' in navigator){"
+"navigator.serviceWorker.getRegistrations().then(function(rs){for(var i=0;i<rs.length;i++)rs[i].unregister();});"
+"}"
+"if('caches' in window){"
+"caches.keys().then(function(ks){for(var i=0;i<ks.length;i++)caches.delete(ks[i]);});"
+"}"
 "if(!document.hidden)__pollStart();"
 "}"
 "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',__initApp);}"
 "else{__initApp();}";
 
-// Wraps an HTML body with standard page header linking to cached CSS and JS
+// Wraps an HTML body with standard page header linking to cached CSS, JS, and PWA manifest
 inline String wrapPage(const char* title, const char* icon, const char* bodyHtml, const char* extraScript = "", bool centered = false) {
   String out;
-  out.reserve(strlen(bodyHtml) + (extraScript ? strlen(extraScript) : 0) + 600);
-  out += "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'><title>";
+  out.reserve(strlen(bodyHtml) + (extraScript ? strlen(extraScript) : 0) + 1024);
+  out += "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'>";
+  out += "<meta name='theme-color' content='#000000'><meta name='color-scheme' content='dark'>";
+  out += "<meta name='mobile-web-app-capable' content='yes'><meta name='apple-mobile-web-app-capable' content='yes'>";
+  out += "<meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'><meta name='apple-mobile-web-app-title' content='SwitchBot'>";
+  out += "<link rel='manifest' href='/manifest.webmanifest'>";
+  out += "<link rel='icon' type='image/png' sizes='192x192' href='/icon-192.png'>";
+  out += "<link rel='icon' type='image/svg+xml' href='/icon.svg'>";
+  out += "<link rel='apple-touch-icon' href='/apple-touch-icon.png'>";
+  out += "<title>";
   out += title;
-  out += "</title><link rel='icon' href='data:image/svg+xml,%3Csvg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"%3E%3Ctext y=\".9em\" font-size=\"90\"%3E";
-  out += icon;
-  out += "%3C/text%3E%3C/svg%3E'>";
+  out += "</title>";
   if (enableOnlineFonts) {
     out += "<link rel='stylesheet' href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap'>";
   }
-  out += "<link rel='stylesheet' href='/style.css?v=3'><script defer src='/app.js?v=3'></script>";
+  out += "<link rel='stylesheet' href='/style.css?v=5'><script defer src='/app.js?v=6'></script>";
   out += "</head><body><div class='wrap";
   if (centered) out += " centered";
   out += "'>";
@@ -312,16 +399,26 @@ inline String wrapPage(const char* title, const char* icon, const char* bodyHtml
 template <typename F>
 inline void sendWrappedPageStream(WebServer &server, const char* title, const char* icon, F bodyWriter, const char* extraScript = "", bool centered = false) {
   server.sendHeader("Connection", "close");
+  server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  server.sendHeader("Pragma", "no-cache");
+  server.sendHeader("Expires", "0");
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.send(200, "text/html; charset=utf-8", "");
 
-  char headBuf[600];
+  char headBuf[1024];
   snprintf(headBuf, sizeof(headBuf),
-    "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'><title>%s</title>"
-    "<link rel='icon' href='data:image/svg+xml,%%3Csvg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"%%3E%%3Ctext y=\".9em\" font-size=\"90\"%%3E%s%%3C/text%%3E%%3C/svg%%3E'>"
+    "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'>"
+    "<meta name='theme-color' content='#000000'><meta name='color-scheme' content='dark'>"
+    "<meta name='mobile-web-app-capable' content='yes'><meta name='apple-mobile-web-app-capable' content='yes'>"
+    "<meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'><meta name='apple-mobile-web-app-title' content='SwitchBot'>"
+    "<link rel='manifest' href='/manifest.webmanifest'>"
+    "<link rel='icon' type='image/png' sizes='192x192' href='/icon-192.png'>"
+    "<link rel='icon' type='image/svg+xml' href='/icon.svg'>"
+    "<link rel='apple-touch-icon' href='/apple-touch-icon.png'>"
+    "<title>%s</title>"
     "%s"
-    "<link rel='stylesheet' href='/style.css?v=3'><script defer src='/app.js?v=3'></script></head><body><div class='wrap%s'>",
-    title, icon,
+    "<link rel='stylesheet' href='/style.css?v=5'><script defer src='/app.js?v=6'></script></head><body><div class='wrap%s'>",
+    title,
     enableOnlineFonts ? "<link rel='stylesheet' href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap'>" : "",
     centered ? " centered" : ""
   );
