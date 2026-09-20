@@ -10,22 +10,26 @@ Version **v1.2** builds directly upon the v1.0 production baseline, focusing on 
 
 ### 🌟 What's New in v1.2
 
-* **Dynamic Hardware Model Detection:** Replaced static chip model strings with native ESP-IDF heap capabilities (`heap_caps_get_total_size(MALLOC_CAP_SPIRAM)`), automatically detecting and formatting exact board hardware (e.g. `ESP32-S3-N16R8`, `ESP32-N4`).
-* **In-Code Board Override (`BOARD_NAME`):** Added `#define BOARD_NAME ""` in `main/main.cpp` for instant manual overrides without touching sensitive credentials or rerunning setup tools.
-* **Multi-Network Wi-Fi Failover (Up to 6 Networks):** Expanded Wi-Fi subsystem to cycle through up to 6 configured Wi-Fi network profiles (`WIFI_SSID_1..6`) with dynamic DHCP fallback for secondary networks.
-* **Broadened Subnet Mask (`255.255.0.0` /16):** Broadened local subnet mask to `/16` to enable direct, seamless bidirectional communication with Windows Hotspot and Internet Connection Sharing (ICS) clients (`192.168.137.x`).
-* **WireGuard Inbound Local Packet Remapping:** Enhanced `wireguardif.c` (`tcpip_input`) to directly map incoming decrypted Tailscale packets destined for `192.168.1.50` into the local lwIP stack, eliminating dropped packets.
-* **Zero-Lag Actuation Priority Elevation:** Added FreeRTOS task priority elevation (priority 5) during `triggerPress()` to guarantee zero-jitter hardware PWM timing regardless of heavy network traffic.
-* **Servo Motor Burnout Watchdog (20s):** Implemented an active 20,000ms safety watchdog on manual calibration holds (`/api/calibrate/hold`). If a client disconnects or holds the motor down, the firmware automatically springs the arm back to rest.
-* **4-Second Press Cooldown & Click Debounce:** Increased `PRESS_COOLDOWN_MS` to 4s and added client-side pointer-event guards to reject accidental multi-clicks and browser speculative retries.
-* **Non-Blocking Boot Standby:** Eliminated ~74s boot stalls by guarding startup Tailscale checks with Wi-Fi association state and backgrounding association timing (`wifi_connect_ms`).
-* **Accelerated L2 ARP Keepalive (10s):** Broadcasts Gratuitous ARP and Gateway ARP probes every 10s (plus startup/reconnect pulses) to prevent router connection drops during modem sleep.
-* **Full-Stream Web Delivery & Battery-Saving Polling:** Streamed JavaScript directly with `sendWrappedPageStream`, tuned live polling to 4.5s, and halted polling when the tab is hidden (`document.hidden`).
-* **Dynamic Servo Card Telemetry:** Rendered the debug Servo telemetry card permanently and added live DOM updates for trigger age, source ("cURL" vs "Web"), and total counts.
-* **Firmware Version Display:** Monospace `v1.2` footer on `/debug`, cURL terminal view, and `/api/live` telemetry.
-* **Cross-Platform Progressive Web App (PWA):** Standalone installable PWA for iOS, Android, and Desktop with `/manifest.webmanifest`, native `⚡` PNG/SVG icons, standalone `/main` launch routing, and safe-area notch padding.
-* **Live Network Actuation:** Configured with strict no-cache headers (`Cache-Control: no-cache, no-store, must-revalidate`) and self-destructing cleanup worker to guarantee all actuations and telemetry are live with zero offline simulation.
-* **Long-Term Asset Caching:** Configured immutable HTTP headers (`Cache-Control: public, max-age=604800, immutable`) for static `/style.css`, `/app.js`, `/manifest.webmanifest`, and `/icon.svg`.
+#### ⚡ Actuation & Reliability
+* **FreeRTOS Priority Elevation:** Elevates servo actuation task priority (Priority 5) during presses to guarantee zero-jitter hardware timing over network tasks.
+* **Extended Hold Safety Watchdog (20s):** Increased manual calibration hold limit (`MAX_HOLD_DURATION_MS`) from 10s to 20s with automatic spring-back to protect the servo motor.
+* **4-Second Press Cooldown & Click Debounce:** Prevents rapid re-triggers, rejects speculative browser retries, and disables UI buttons immediately upon tap.
+* **Eliminated Boot Time Hangs:** Removed synchronous Tailscale checks during boot when Wi-Fi is still associating, eliminating 74-second DNS timeout stalls.
+
+#### 🌐 Networking & WireGuard
+* **Multi-Network Wi-Fi Cycling:** Supports up to 6 configured Wi-Fi profiles with 8-second disconnect monitoring, auto-reconnect, and dynamic DHCP fallback for secondary networks.
+* **Broadened Subnet Compatibility (`/16`):** Updated default subnet mask to `255.255.0.0` for seamless communication with Windows Hotspots and Internet Connection Sharing (ICS).
+* **WireGuard Inbound Route Delivery:** Fixed local interface packet remapping in `wireguardif.c` (`tcpip_input`) so incoming WireGuard traffic cleanly reaches the local web server.
+* **10-Second L2 Keepalives:** Accelerated Gratuitous ARP and Gateway probes from 45s to 10s (with startup pulses) to prevent router connection drops during Wi-Fi power-save sleep.
+
+#### 📱 Web Dashboard & Progressive Web App (PWA)
+* **Cross-Platform PWA Support:** Installable on iOS, Android, and Desktop with `/manifest.webmanifest`, standalone window mode, safe-area notch padding, and custom `⚡` app icons.
+* **Strict Live Network Actuation:** Eliminated offline caching via clean self-destructing service workers and strict `no-cache` headers, ensuring every command directly targets the hardware.
+* **Dynamic Servo Telemetry:** Debug dashboard permanently displays the servo card with real-time DOM updates for actuation count, elapsed time, and trigger source (`Web` vs `cURL`).
+* **Firmware Version Display:** Monospace `v1.2` version badge added to the debug dashboard footer, cURL terminal banner, and `/api/live` telemetry.
+* **Adaptive Duration Formatting:** Automatically formats connection and uptime durations into human-readable units (`ms` → `s` → `m s` → `h m`).
+* **Socket Starvation Prevention:** Added dedicated `/favicon.ico` route with 7-day caching to stop mobile browser 404 polling storms.
+
 
 ---
 
